@@ -1,15 +1,25 @@
-name: 📊 Daily Stock Screener
+name: 📊 盘中选股扫描 + 盘后日报
 
 on:
-  # 每天北京时间 15:30 运行（收盘后）
+  # 盘中扫描：10:00 / 11:00 / 13:30 / 14:30（可买入时间）
   schedule:
+    - cron: '0 2 * * 1-5'   # UTC 02:00 = 北京时间 10:00
+    - cron: '0 3 * * 1-5'   # UTC 03:00 = 北京时间 11:00
+    - cron: '30 5 * * 1-5'  # UTC 05:30 = 北京时间 13:30
+    - cron: '30 6 * * 1-5'  # UTC 06:30 = 北京时间 14:30 ⭐ 过夜持股法窗口
+  
+  # 盘后日报：15:30（生成当日报告）
     - cron: '30 7 * * 1-5'  # UTC 07:30 = 北京时间 15:30
   
   # 允许手动触发
   workflow_dispatch:
     inputs:
-      mock:
-        description: '使用模拟数据测试'
+      scan_time:
+        description: '扫描时间 (10:00/11:00/13:30/14:30/15:30)'
+        required: false
+        default: '14:30'
+      push_wechat:
+        description: '推送到微信 (true/false)'
         required: false
         default: 'false'
 
