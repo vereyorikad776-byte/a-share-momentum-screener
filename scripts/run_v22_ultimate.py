@@ -27,7 +27,7 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 # 导入各模块
-from v22_engine import run_v22_scoring, scan_5day_sectors, merge_hot_sectors
+from v22_engine import run_v22_scoring, run_v22_scoring_enhanced, format_v22_enhanced_report, scan_5day_sectors, merge_hot_sectors
 from feedback_learning import (
     log_after_scoring, calc_hit_rate, update_pattern_stats,
     get_learning_report, cleanup_old_data
@@ -76,9 +76,12 @@ def run_single_stock(code: str, name: str, data: dict = None) -> dict:
     
     # 如果没有提供数据，尝试从DuckDB获取
     if data is None:
-        from data_cache import DuckDBCache
-        cache = DuckDBCache()
-        df = cache.get_kline(code)
+        from data_cache import StockDataCache
+        from datetime import datetime, timedelta
+        cache = StockDataCache()
+        end_date = datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.now() - timedelta(days=60)).strftime('%Y%m%d')
+        df = cache.get_kline(code, start_date=start_date, end_date=end_date)
         if df is not None and len(df) > 0:
             latest = df.iloc[-1]
             data = {
@@ -100,30 +103,11 @@ def run_single_stock(code: str, name: str, data: dict = None) -> dict:
             print(f"⚠ 无法获取 {code} 的历史数据，请提供实时数据")
             return None
     
-    # 运行评分
-    result = run_v22_scoring(data)
+    # 运行评分 — v2.2r++ 增强版（自动调用Iwencai SkillHub）
+    result = run_v22_scoring_enhanced(data, stock_name=name, stock_code=code)
     
-    # 打印结果
-    print(f"\n【评分结果】")
-    print(f"  评级: {result['tier']}级")
-    print(f"  综合分: {result['final_score']:.3f}")
-    print(f"  操作建议: 【{result['action']}】{result['action_reason']}")
-    if result.get('buy_price'):
-        print(f"  买入价位: {result['buy_price']}")
-    if result.get('stop_loss'):
-        print(f"  止损位: {result['stop_loss']}")
-    
-    print(f"\n【各维度得分】")
-    print(f"  技术面: {result.get('technical_score', 0)}/25")
-    print(f"  情绪面: {result.get('sentiment_score', 0)}/15")
-    print(f"  资金面: {result.get('fund_score', 0)}/15")
-    print(f"  基本面: {result.get('fundamental_score', 0)}/15")
-    print(f"  消息面: {result.get('news_score', 0):+.1f}/±5")
-    print(f"  市场环境: {result.get('market_score', 0):+.1f}/±5")
-    
-    print(f"\n【过夜预测】")
-    print(f"  胜率: {result.get('overnight_prob', 0):.1f}% [{result.get('overnight_grade', '?')}]")
-    print(f"  策略类型: {result.get('strategy_type', '观望')}")
+    # 打印增强版报告
+    print(format_v22_enhanced_report(result, stock_name=name, stock_code=code))
     
     # 记录日志
     log_after_scoring(code, name, result)

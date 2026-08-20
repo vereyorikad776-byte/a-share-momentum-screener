@@ -2096,3 +2096,209 @@ if __name__ == '__main__':
     print(f"\n理由:")
     for r in result['reasons']:
         print(f"  - {r}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# v2.2r++ Iwencai增强版 — 整合问财25个官方API
+# ═══════════════════════════════════════════════════════════════
+
+# 导入Iwencai桥接层（失败不阻止评分）
+try:
+    from v22_iwencai_bridge import run_iwencai_enhancement
+    _IWENCAI_AVAILABLE = True
+except Exception:
+    _IWENCAI_AVAILABLE = False
+
+
+def run_v22_scoring_enhanced(data: dict, stock_name: str = "", stock_code: str = "") -> dict:
+    """
+    v2.2r++ Iwencai增强版评分 — 在原有v22评分基础上叠加Iwencai多维度数据
+    
+    新增维度:
+    - 消息面增强: news + announcement + report (原-5~5分 → 增强后-5~5分，但理由更详细)
+    - 机构面: institutional_score 0~5分 (机构调研 + 管理层稳定性)
+    - 事件面: event_score -5~5分 (重大事项/重组/并购/风险事件)
+    - 财务增强: finance_enhance -3~3分 (行业PE对比/ROE分析)
+    
+    输出增加:
+    - iwencai_info: 完整的Iwencai分析详情
+    - 报告形式: "这只票经过系统筛选，凭什么原因给到这个评分"
+    """
+    # 1. 先跑原有v22评分（不变）
+    result = run_v22_scoring(data)
+    
+    # 2. 获取Iwencai增强数据（失败不影响基础评分）
+    iwencai_info = None
+    if _IWENCAI_AVAILABLE and stock_name:
+        try:
+            iwencai_info = run_iwencai_enhancement(stock_name, stock_code)
+        except Exception as e:
+            iwencai_info = {"error": str(e), "total_iwencai": 0.0}
+    
+    # 3. 合并Iwencai数据到result
+    if iwencai_info:
+        result["iwencai"] = iwencai_info
+        result["iwencai_total"] = iwencai_info.get("total_iwencai", 0.0)
+        
+        # 把Iwencai维度理由加入总理由
+        result["reasons"].append(f"[Iwencai] 消息面: {iwencai_info.get('news_score', 0):+.1f}")
+        result["reasons"].append(f"[Iwencai] 机构面: {iwencai_info.get('institutional_score', 0):.1f}")
+        result["reasons"].append(f"[Iwencai] 事件面: {iwencai_info.get('event_score', 0):+.1f}")
+        result["reasons"].append(f"[Iwencai] 财务增强: {iwencai_info.get('finance_enhance', 0):+.1f}")
+        
+        # 把Iwencai总分作为微调项加到final_score（±0.1范围）
+        # 不破坏原有评分体系，只是轻微调整
+        iwencai_total = iwencai_info.get("total_iwencai", 0)
+        adjustment = max(-0.1, min(0.1, iwencai_total * 0.02))  # Iwencai总分映射到±0.1
+        result["final_score"] = round(result["final_score"] + adjustment, 3)
+        result["iwencai_adjustment"] = round(adjustment, 3)
+        
+        # 如果事件面有重大利空，可能降级
+        if iwencai_info.get("event_score", 0) <= -3:
+            if result["tier"] in ["S", "A"]:
+                result["tier"] = "B"
+                result["reasons"].append("[Iwencai] ⚠️ 事件面有重大风险，降级处理")
+        
+        # 如果机构面无调研且管理层变动频繁，降级
+        if iwencai_info.get("institutional_score", 0) <= 1 and iwencai_info.get("event_score", 0) < 0:
+            if result["tier"] == "S":
+                result["tier"] = "A"
+                result["reasons"].append("[Iwencai] ⚠️ 机构关注度低+管理层不稳定，降级")
+    else:
+        result["iwencai"] = {"error": "Iwencai数据未获取"}
+        result["iwencai_total"] = 0.0
+        result["iwencai_adjustment"] = 0.0
+    
+    return result
+
+
+def format_v22_enhanced_report(result: dict, stock_name: str = "", stock_code: str = "") -> str:
+    """
+    生成v2.2r++增强版详细报告 — "凭什么给这个评分"
+    
+    输出格式:
+    === 贵州茅台(600519) 评分报告 ===
+    综合评级: A | 最终得分: 0.823 (Iwencai微调 +0.02)
+    
+    【技术面】18.5/25
+      - MACD>0(+1.2)
+      - 均线多头排列(+2.0)
+      ...
+    
+    【情绪面】12.0/15
+      - 涨幅5.2%(+3.0)
+      ...
+    
+    【资金面】8.5/15
+      ...
+    
+    【基本面】7.0/10 | F-Score: 4/5 (良好) | Z-Score: 2.8 (安全)
+      ...
+    
+    【消息面】+2.0/-5~5
+      - 新闻情绪: 正面 (近5条中3条利好)
+      - 公告: 业绩预增(+1.0)
+      - 研报: 6份覆盖，2份买入评级(+2.0)
+    
+    【机构面】3.5/5
+      - 近6个月12次机构调研
+      - 含中金/中信证券等头部机构
+      - 管理层稳定，近期无变动
+    
+    【事件面】+1.0/-5~5
+      - 利好事件: 战略合作...
+    
+    【财务增强】+1.5/-3~3
+      - PE 25.3低于行业均值32.1(78%)
+      - ROE 18.5%优秀
+    
+    【操作建议】买入 | S级信号
+      买入价: 1500.0 | 止损: 1425.0 | 止盈: 1650.0
+    """
+    lines = []
+    name_str = f"{stock_name}({stock_code})" if stock_name else "未知股票"
+    lines.append(f"=== {name_str} v2.2r++ 增强评分报告 ===")
+    lines.append("")
+    
+    # 综合
+    tier = result.get("tier", "X")
+    final = result.get("final_score", 0)
+    adj = result.get("iwencai_adjustment", 0)
+    lines.append(f"📊 综合评级: {tier} | 最终得分: {final:.3f}")
+    if adj != 0:
+        lines[-1] += f" (Iwencai微调 {adj:+.3f})"
+    lines.append("")
+    
+    # 一夜持股法 + 三维融合
+    lines.append(f"🌙 一夜持股法: {result.get('overnight_score', 0):.1f}/20 ({result.get('overnight_grade', '')})")
+    lines.append(f"📈 三维融合: {result.get('fusion_score', 0):.1f}/15 ({result.get('fusion_grade', '')})")
+    lines.append(f"🎯 模式检测: {result.get('pattern_name', '无')} ({result.get('pattern', 0):.1f})")
+    lines.append("")
+    
+    # 六维度
+    lines.append(f"【技术面】{result.get('tech', 0):.1f}/25")
+    lines.append(f"【情绪面】{result.get('sentiment', 0):.1f}/15")
+    lines.append(f"【资金面】{result.get('fund', 0):.1f}/15")
+    lines.append(f"【基本面】{result.get('fundamental', 0):.1f}/10 | F-Score: {result.get('f_score', 'N/A')}/5 ({result.get('quality_tag', '')})")
+    lines.append(f"【市场环境】{result.get('market', 0):+.1f} (乘数{result.get('step_multiplier', 1.0):.2f})")
+    lines.append(f"【消息面】{result.get('news', 0):+.1f}/±5")
+    lines.append("")
+    
+    # Iwencai增强维度
+    iw = result.get("iwencai", {})
+    if "error" not in iw or iw.get("total_iwencai", 0) > 0:
+        lines.append("═══ Iwencai SkillHub 增强分析 ═══")
+        lines.append("")
+        
+        # 消息面详情
+        lines.append(f"📰 【消息面增强】{iw.get('news_score', 0):+.1f}/±5")
+        news_d = iw.get("details", {}).get("news", {})
+        for r in news_d.get("sentiment_reasons", []):
+            lines.append(f"    • 新闻情绪: {r}")
+        for r in news_d.get("announcement_reasons", [])[:2]:
+            lines.append(f"    • {r}")
+        for r in news_d.get("report_reasons", [])[:2]:
+            lines.append(f"    • {r}")
+        lines.append("")
+        
+        # 机构面
+        lines.append(f"🏛️ 【机构面】{iw.get('institutional_score', 0):.1f}/5")
+        inst_d = iw.get("details", {}).get("institutional", {})
+        for r in inst_d.get("research_reasons", [])[:2]:
+            lines.append(f"    • {r}")
+        for r in inst_d.get("management_reasons", [])[:2]:
+            lines.append(f"    • {r}")
+        lines.append("")
+        
+        # 事件面
+        lines.append(f"⚡ 【事件面】{iw.get('event_score', 0):+.1f}/±5")
+        evt_d = iw.get("details", {}).get("event", {})
+        for r in evt_d.get("reasons", [])[:3]:
+            lines.append(f"    • {r}")
+        lines.append("")
+        
+        # 财务增强
+        lines.append(f"💰 【财务增强】{iw.get('finance_enhance', 0):+.1f}/±3")
+        fin_d = iw.get("details", {}).get("finance", {})
+        for r in fin_d.get("reasons", [])[:3]:
+            lines.append(f"    • {r}")
+        lines.append("")
+    
+    # 操作建议
+    action = result.get("action", "观望")
+    action_reason = result.get("action_reason", "")
+    lines.append(f"🎯 【操作建议】{action}")
+    if action_reason:
+        lines.append(f"    理由: {action_reason}")
+    if result.get("buy_price"):
+        lines.append(f"    买入价: {result['buy_price']}")
+    if result.get("stop_loss"):
+        lines.append(f"    止损: {result['stop_loss']}")
+    lines.append("")
+    
+    # 核心理由汇总
+    lines.append("📋 【核心理由汇总】")
+    for r in result.get("reasons", [])[:15]:
+        lines.append(f"  - {r}")
+    
+    return "\n".join(lines)
