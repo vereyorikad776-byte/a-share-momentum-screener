@@ -21,6 +21,7 @@ import random
 import re
 import json
 import urllib.request
+import hashlib
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
@@ -421,36 +422,30 @@ def daily_dragon_tiger(trade_date: str = None, min_net_buy: float = None) -> lis
 
 
 # ═══════════════════════════════════════════════════════════════
-# 8. 同花顺 — 当日强势股 + 题材归因
+# 8. 财联社 — 7×24 实时电报（已测试 ✅ 正常）
 # ═══════════════════════════════════════════════════════════════
 
-def ths_hot_reason(date: str = None) -> pd.DataFrame:
-    """同花顺热点 — 当日强势股 + 题材标签"""
-    if date is None:
-        date = datetime.now().strftime("%Y%m%d")
-    url = "https://dq.10jqka.com.cn/fuyao/hotListData/hotListConcept"
-    params = {"date": date}
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://dq.10jqka.com.cn/",
-    }
-    r = requests.get(url, params=params, headers=headers, timeout=10)
+def cls_telegraph(keyword: str = None, page_size: int = 50) -> list:
+    """财联社电报 — 零key，本地签名"""
+    params = {"appName": "CailianpressWeb", "os": "web", "sv": "7.7.5",
+              "refresh_type": "1", "rn": str(page_size)}
+    qs = "&".join(f"{k}={params[k]}" for k in sorted(params))
+    sign = hashlib.md5(hashlib.sha1(qs.encode()).hexdigest().encode()).hexdigest()
+    url = f"https://www.cls.cn/v1/roll/get_roll_list?{qs}&sign={sign}"
+    headers = {"User-Agent": UA, "Referer": "https://www.cls.cn/"}
+    r = requests.get(url, headers=headers, timeout=10)
     d = r.json()
-    data = d.get("data", {})
-    stocks = data.get("list", [])
-
     rows = []
-    for s in stocks:
-        rows.append({
-            "code": s.get("code", ""),
-            "name": s.get("name", ""),
-            "price": s.get("price", 0),
-            "change_pct": s.get("change", 0),
-            "reason": s.get("reason", ""),
-            "concept": s.get("concept", ""),
-            "hot_rank": s.get("hot_rank", 0),
-        })
-    return pd.DataFrame(rows)
+    for item in (d.get("data") or {}).get("roll_data") or []:
+        ts = item.get("ctime")
+        t = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+        title = item.get("title", "") or item.get("brief", "")
+        content = item.get("content", "") or item.get("brief", "")
+        # 按关键词过滤
+        if keyword and keyword not in title + content:
+            continue
+        rows.append({"title": title, "content": content, "time": t})
+    return rows
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -554,11 +549,14 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"   ⚠️ 东财限流: {type(e).__name__}")
 
-    # 5. 同花顺热点
-    print("\n5. 同花顺热点:")
-    hot = ths_hot_reason()
-    if not hot.empty:
-        print(f"   共 {len(hot)} 只强势股")
-        print(f"   TOP3: {hot[['name', 'change_pct']].head(3).to_string(index=False)}")
+    # 5. 财联社电报
+    print("\n5. 财联社电报:")
+    try:
+        news = cls_telegraph(page_size=5)
+        print(f"   共 {len(news)} 条")
+        for n in news[:3]:
+            print(f"   {n['time']} | {n['title'][:40]}")
+    except Exception as e:
+        print(f"   ⚠️ 财联社: {type(e).__name__}")
 
     print("\n=== 测试完成 ===")
