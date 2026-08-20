@@ -1,0 +1,184 @@
+{
+  "data_source": {
+    "primary": "baostock",
+    "realtime": "ifind",
+    "fundamentals": "ifind",
+    "news": "ifind",
+    "cache": {
+      "enabled": true,
+      "storage_dir": null,
+      "auto_fetch": true
+    }
+  },
+  "pools": {
+    "bottom": {
+      "name": "底部放量池",
+      "description": "底部放量异动票,等板块确认后升级",
+      "max_size": 20,
+      "scan_frequency": "daily",
+      "priority": 1
+    },
+    "limit_up": {
+      "name": "涨停池",
+      "description": "昨日涨停 + 回踩后二次启动候选",
+      "max_size": 20,
+      "scan_frequency": "daily",
+      "priority": 2
+    },
+    "main_line": {
+      "name": "主线池",
+      "description": "当前热点板块核心票",
+      "max_size": 20,
+      "scan_frequency": "daily",
+      "priority": 3
+    },
+    "strong": {
+      "name": "强势池",
+      "description": "趋势完好,回踩均线买入",
+      "max_size": 20,
+      "scan_frequency": "daily",
+      "priority": 4
+    },
+    "watchlist": {
+      "name": "自选池",
+      "description": "同花顺人气热度榜Top20,按评分动态更新",
+      "max_size": 20,
+      "scan_frequency": "daily",
+      "priority": 5
+    }
+  },
+  "scoring": {
+    "weights": {
+      "overnight": 0.35,
+      "fusion": 0.35,
+      "debate": 0.2,
+      "base": 0.1
+    },
+    "tier_thresholds": {
+      "S": {
+        "pattern": 2.0,
+        "overnight": 12,
+        "fusion": 10
+      },
+      "A": {
+        "pattern": 1.0,
+        "overnight": 8,
+        "fusion": 7
+      },
+      "B": {
+        "overnight": 5,
+        "fusion": 5
+      }
+    },
+    "exclusion": {
+      "min_turnover": 50000000,
+      "max_drop_2day": 15,
+      "enable_st_filter": true,
+      "enable_news_blacklist": true
+    }
+  },
+  "trading": {
+    "commission_rate": 0.00025,
+    "stamp_duty_rate": 0.001,
+    "transfer_fee_rate": 2e-05,
+    "min_commission": 5,
+    "slippage": {
+      "mode": "ratio",
+      "buy_ratio": 0.001,
+      "sell_ratio": 0.001
+    },
+    "price_precision": {
+      "default": 0.01,
+      "high_price": {
+        "threshold": 100,
+        "precision": 0.01
+      }
+    },
+    "t_plus": {
+      "default": 1,
+      "etf_t0": true,
+      "kfund_t0": true
+    }
+  },
+  "risk": {
+    "hard_stop_loss": -0.07,
+    "ma_stop": true,
+    "profit_drawdown_stop": -0.1,
+    "take_profit": 0.15,
+    "max_position_per_stock": 0.2,
+    "max_total_position": 0.8,
+    "min_cash_ratio": 0.2,
+    "no_trade_after_stop": true
+  },
+  "intraday": {
+    "enabled": true,
+    "schedule": {
+      "0930": {
+        "name": "开盘突破",
+        "query": "主板非ST股票,今日涨跌幅大于3%小于8%,今日主力资金净流入大于3000万",
+        "buy_type": "突破",
+        "position_pct": 0.1,
+        "need_fund_flow": "1d",
+        "enable_pool_snapshot": true
+      },
+      "1030": {
+        "name": "盘中蓄势",
+        "query": "主板非ST股票,今日涨跌幅大于-1%小于5%,今日主力资金净流入大于1000万",
+        "buy_type": "蓄势",
+        "position_pct": 0.08,
+        "need_fund_flow": "1d",
+        "enable_pool_snapshot": true
+      },
+      "1100": {
+        "name": "午盘前确认",
+        "query": "主板非ST股票,今日涨跌幅大于0%小于6%,今日主力资金净流入大于2000万",
+        "buy_type": "确认",
+        "position_pct": 0.1,
+        "need_fund_flow": "1d",
+        "enable_pool_snapshot": true
+      },
+      "1330": {
+        "name": "午后异动",
+        "query": "主板非ST股票,今日涨跌幅大于2%小于7%,今日主力资金净流入大于3000万",
+        "buy_type": "午后启动",
+        "position_pct": 0.12,
+        "need_fund_flow": "1d",
+        "enable_pool_snapshot": true
+      },
+      "1430": {
+        "name": "一夜持股法",
+        "query": "主板非ST股票,今日涨跌幅大于-3%小于5%,近5日主力资金净流入大于5000万",
+        "buy_type": "隔夜",
+        "position_pct": 0.2,
+        "need_fund_flow": "5d",
+        "enable_pool_snapshot": true
+      }
+    },
+    "max_candidates_per_scan": 5,
+    "max_pool_snapshot": 30
+  },
+  "backtest": {
+    "init_capital": 1000000,
+    "index_benchmark": "000001",
+    "output_dir": null,
+    "output_format": [
+      "console",
+      "csv",
+      "json"
+    ],
+    "output_files": {
+      "summary": "summary.csv",
+      "trades": "trades.csv",
+      "daily": "daily_stats.csv",
+      "benchmark": "benchmark.csv"
+    },
+    "enable_mae_mfe": true,
+    "enable_regime_analysis": true,
+    "enable_calibration": true
+  },
+  "quota": {
+    "ifind_monthly_limit": 5000,
+    "ifind_daily_estimate": 95,
+    "alert_threshold": 0.8
+  }
+}

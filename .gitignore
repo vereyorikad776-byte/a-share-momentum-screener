@@ -1,0 +1,22 @@
+# 数据缓存（不提交大文件）
+data/duckdb_storage/
+data/daily/
+data/top20_*.json
+data/feedback/*.jsonl
+data/feedback/*.json
+data/paper_trading/
+data/pools/*.duckdb
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# 临时文件
+*.tar.gz
+*.log
+
+# 运行时数据（不提交）
+data/*
+!data/.gitkeep

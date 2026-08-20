@@ -1,0 +1,32 @@
+{
+  "bottom_pool.json": {
+    "name": "底部放量池",
+    "max_size": 20,
+    "source": "用户每日盘后提供"
+  },
+  "limit_up_pool.json": {
+    "name": "涨停池",
+    "max_size": 20,
+    "source": "自动数据源抓取"
+  },
+  "main_line_pool.json": {
+    "name": "主线池",
+    "max_size": 20,
+    "source": "iFinD板块资金流"
+  },
+  "strong_pool.json": {
+    "name": "强势池",
+    "max_size": 20,
+    "source": "趋势筛选"
+  },
+  "watchlist_pool.json": {
+    "name": "自选池",
+    "max_size": 20,
+    "source": "用户提供"
+  },
+  "hot_pool.json": {
+    "name": "人气池",
+    "max_size": 20,
+    "source": "龙虎榜+同花顺人气榜"
+  }
+}
