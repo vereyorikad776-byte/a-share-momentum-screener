@@ -22,6 +22,7 @@ import re
 import json
 import urllib.request
 import hashlib
+import os
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
@@ -521,6 +522,210 @@ def chip_distribution(df: pd.DataFrame, grid_size: int = 300, decay: float = 1.0
 # 10. 测试
 # ═══════════════════════════════════════════════════════════════
 
+
+# ═══════════════════════════════════════════════════════════════
+# 11. Iwencai SkillHub — 同花顺问财官方API（25个技能统一封装）
+# ═══════════════════════════════════════════════════════════════
+
+import subprocess as _subprocess
+
+_IWENCAI_BASE = os.environ.get("IWENCAI_BASE_URL", "https://openapi.iwencai.com")
+_IWENCAI_KEY = os.environ.get("IWENCAI_API_KEY", "")
+_SKILL_DIR = Path("/root/.openclaw/workspace/skills")
+
+_IWENCAI_SKILL_MAP = {
+    "news-search": "news-search/scripts/news_search.py",
+    "announcement-search": "announcement-search/scripts/announcement_search.py",
+    "report-search": "report-search/scripts/report_search.py",
+    "hithink-zhishu-query": "hithink-zhishu-query/scripts/cli.py",
+    "hithink-sector-selector": "hithink-sector-selector/scripts/cli.py",
+    "hithink-management-query": "hithink-management-query/scripts/cli.py",
+    "hithink-macro-query": "hithink-macro-query/scripts/cli.py",
+    "hithink-usstock-selector": "hithink-usstock-selector/scripts/cli.py",
+    "hithink-market-query": "hithink-market-query/scripts/cli.py",
+    "hithink-insresearch-query": "hithink-insresearch-query/scripts/cli.py",
+    "hithink-industry-query": "hithink-industry-query/scripts/cli.py",
+    "hithink-hkstock-selector": "hithink-hkstock-selector/scripts/cli.py",
+    "hithink-futures-selector": "hithink-futures-selector/scripts/cli.py",
+    "hithink-futures-query": "hithink-futures-query/scripts/cli.py",
+    "hithink-fund-selector": "hithink-fund-selector/scripts/cli.py",
+    "hithink-fundmanager-selector": "hithink-fundmanager-selector/scripts/cli.py",
+    "hithink-fundcompany-selector": "hithink-fundcompany-selector/scripts/cli.py",
+    "hithink-fund-query": "hithink-fund-query/scripts/cli.py",
+    "hithink-finance-query": "hithink-finance-query/scripts/cli.py",
+    "hithink-event-query": "hithink-event-query/scripts/cli.py",
+    "hithink-business-query": "hithink-business-query/scripts/cli.py",
+    "hithink-etf-selector": "hithink-etf-selector/scripts/cli.py",
+    "hithink-cb-selector": "hithink-cb-selector/scripts/cli.py",
+    "hithink-astock-selector": "hithink-astock-selector/scripts/cli.py",
+    "hithink-basicinfo-query": "hithink-basicinfo-query/scripts/cli.py",
+}
+
+
+def iwencai_query(skill_name: str, query: str, limit: int = 10, **extra) -> dict:
+    """通用Iwencai SkillHub调用器 — 返回结构化JSON"""
+    if not _IWENCAI_KEY:
+        return {"success": False, "data": [], "error": "IWENCAI_API_KEY 未配置"}
+    script_rel = _IWENCAI_SKILL_MAP.get(skill_name)
+    if not script_rel:
+        return {"success": False, "data": [], "error": f"未知skill: {skill_name}"}
+    script_path = _SKILL_DIR / script_rel
+    if not script_path.exists():
+        return {"success": False, "data": [], "error": f"脚本不存在: {script_path}"}
+    if "cli.py" in str(script_path):
+        cmd = ["python3", str(script_path), "--query", query]
+        if limit != 10:
+            cmd += ["--limit", str(limit)]
+    else:
+        cmd = ["python3", str(script_path), query]
+        if limit != 10:
+            cmd += ["--size", str(limit)]
+    env = os.environ.copy()
+    env["IWENCAI_BASE_URL"] = _IWENCAI_BASE
+    env["IWENCAI_API_KEY"] = _IWENCAI_KEY
+    try:
+        result = _subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, env=env,
+            cwd=str(script_path.parent)
+        )
+        if result.returncode != 0:
+            return {"success": False, "data": [], "error": result.stderr[:500]}
+        output = result.stdout.strip()
+        json_start = output.find("{")
+        if json_start >= 0:
+            output = output[json_start:]
+        data = json.loads(output)
+        if "status_code" in data:
+            success = data.get("status_code") == 0
+            return {"success": success, "data": data.get("data", []),
+                    "error": None if success else data.get("status_msg", "")}
+        elif "success" in data:
+            return {"success": data["success"], "data": data.get("datas", []),
+                    "error": data.get("empty_data_tip", None)}
+        else:
+            return {"success": True, "data": data, "error": None}
+    except json.JSONDecodeError as e:
+        return {"success": False, "data": [], "error": f"JSON解析失败: {e}"}
+    except Exception as e:
+        return {"success": False, "data": [], "error": f"调用异常: {type(e).__name__}: {e}"}
+
+
+def iwencai_news(stock_name: str, keyword: str = None, limit: int = 5) -> list:
+    q = f"{stock_name} {keyword}" if keyword else stock_name
+    r = iwencai_query("news-search", q, limit)
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_announcement(stock_name: str, keyword: str = None, limit: int = 5) -> list:
+    q = f"{stock_name} {keyword}" if keyword else stock_name
+    r = iwencai_query("announcement-search", q, limit)
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_report(stock_name: str, limit: int = 3) -> list:
+    r = iwencai_query("report-search", f"{stock_name} 研报", limit)
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_sector_ranking(period: str = "近一周", limit: int = 10) -> list:
+    r = iwencai_query("hithink-sector-selector", f"{period}涨幅最大的板块", limit)
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_macro(indicator: str = "GDP同比增长率") -> list:
+    r = iwencai_query("hithink-macro-query", f"中国最新{indicator}")
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_index(name: str = "上证指数") -> dict:
+    r = iwencai_query("hithink-zhishu-query", f"{name}最新点位")
+    data = r.get("data", [])
+    return data[0] if data and r["success"] else {}
+
+
+def iwencai_stock_screen(query: str, limit: int = 20) -> list:
+    r = iwencai_query("hithink-astock-selector", query, limit)
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_us_stock(name: str) -> dict:
+    r = iwencai_query("hithink-usstock-selector", f"{name}股价")
+    data = r.get("data", [])
+    return data[0] if data and r["success"] else {}
+
+
+def iwencai_hk_stock(name: str) -> dict:
+    r = iwencai_query("hithink-hkstock-selector", f"{name}股价")
+    data = r.get("data", [])
+    return data[0] if data and r["success"] else {}
+
+
+def iwencai_futures(name: str) -> dict:
+    r = iwencai_query("hithink-futures-selector", f"{name}主力合约")
+    data = r.get("data", [])
+    return data[0] if data and r["success"] else {}
+
+
+def iwencai_fund(name: str) -> dict:
+    r = iwencai_query("hithink-fund-query", f"{name}基金净值")
+    data = r.get("data", [])
+    return data[0] if data and r["success"] else {}
+
+
+def iwencai_industry_pe(industry: str) -> dict:
+    r = iwencai_query("hithink-industry-query", f"{industry}行业估值")
+    data = r.get("data", [])
+    return data[0] if data and r["success"] else {}
+
+
+def iwencai_management(stock_name: str) -> list:
+    r = iwencai_query("hithink-management-query", f"{stock_name}管理层变动")
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_insresearch(stock_name: str) -> list:
+    r = iwencai_query("hithink-insresearch-query", f"{stock_name}机构调研")
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_etf(query: str, limit: int = 10) -> list:
+    r = iwencai_query("hithink-etf-selector", query, limit)
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_cb(query: str, limit: int = 10) -> list:
+    r = iwencai_query("hithink-cb-selector", query, limit)
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_event(stock_name: str) -> list:
+    r = iwencai_query("hithink-event-query", f"{stock_name}重大事项")
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_business(stock_name: str) -> dict:
+    r = iwencai_query("hithink-business-query", f"{stock_name}主营业务")
+    data = r.get("data", [])
+    return data[0] if data and r["success"] else {}
+
+
+def iwencai_finance(stock_name: str) -> dict:
+    r = iwencai_query("hithink-finance-query", f"{stock_name}财务数据")
+    data = r.get("data", [])
+    return data[0] if data and r["success"] else {}
+
+
+def iwencai_fundmanager(name: str = None) -> list:
+    q = name if name else "明星基金经理"
+    r = iwencai_query("hithink-fundmanager-selector", q)
+    return r.get("data", []) if r["success"] else []
+
+
+def iwencai_fundcompany(limit: int = 10) -> list:
+    r = iwencai_query("hithink-fundcompany-selector", "规模排名前10的基金公司", limit)
+    return r.get("data", []) if r["success"] else []
+
+
 if __name__ == "__main__":
     print("=== 测试 enhanced_data_feed ===\n")
 
@@ -558,5 +763,19 @@ if __name__ == "__main__":
             print(f"   {n['time']} | {n['title'][:40]}")
     except Exception as e:
         print(f"   ⚠️ 财联社: {type(e).__name__}")
+
+    # 6. Iwencai SkillHub
+    print("\n6. Iwencai SkillHub:")
+    try:
+        news = iwencai_news("贵州茅台", "提价")
+        print(f"   新闻: {len(news)}条")
+        ann = iwencai_announcement("贵州茅台", "分红")
+        print(f"   公告: {len(ann)}条")
+        sectors = iwencai_sector_ranking("近一周")
+        print(f"   板块TOP3: {[s['指数简称'] for s in sectors[:3]]}")
+        idx = iwencai_index("上证指数")
+        print(f"   上证指数: {idx.get('最新价', 'N/A')}")
+    except Exception as e:
+        print(f"   ⚠️ Iwencai: {type(e).__name__}: {e}")
 
     print("\n=== 测试完成 ===")
