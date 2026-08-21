@@ -424,8 +424,8 @@ def step1_mandatory_exclusion(data: dict) -> Tuple[bool, List[str]]:
         # 高开高走不排除
     
     change_pct_2d = data.get('change_pct_2d', 0)
-    if change_pct_2d < -15:
-        reasons.append(f"连续2日跌幅{change_pct_2d:.1f}% > 15%")
+    if change_pct_2d < -20:  # v2.2r++: 放宽至20%，保留超跌反弹机会
+        reasons.append(f"连续2日跌幅{change_pct_2d:.1f}% > 20%")
     
     amount = data.get('amount', 0)
     if amount < 5000:
@@ -567,6 +567,36 @@ def step2_pattern_detection(data: dict) -> Tuple[float, str]:
                               if cost > 0 and close < cost * 0.7)
         if deep_trap_score > 10 and auction_strength > 0.3:
             patterns.append((0.6, "筹码反转"))
+    
+    # 模式7: 超跌反弹 (v2.2r++ 新增)
+    change_5d = data.get('change_5d', 0)
+    rsi6 = data.get('rsi6', 50)
+    low = data.get('low', close)
+    open_price = data.get('open', close)
+    macd = data.get('macd', 0)
+    macd_signal = data.get('macd_signal', macd)
+    high = data.get('high', close)
+    
+    # 超跌条件
+    is_oversold = change_5d < -10  # 5日跌幅>10%
+    is_rsi_low = rsi6 < 42  # RSI接近超卖
+    # 止跌信号：收阳线 或 长下影线
+    is_bullish = close > open_price
+    day_range = high - low if high > low else 0.001
+    lower_shadow = (min(close, open_price) - low) / day_range if day_range > 0 else 0
+    has_long_shadow = lower_shadow > 0.5  # 下影线超过50%
+    
+    # MACD信号：底背离或即将金叉
+    macd_bullish = macd > macd_signal  # DIFF在DEA上方
+    macd_near_zero = abs(macd) < 1.5  # MACD接近零轴（水下金叉区域）
+    
+    if is_oversold and is_rsi_low and (is_bullish or has_long_shadow):
+        if macd_bullish and macd_near_zero:
+            patterns.append((1.0, "超跌反弹(水下金叉)"))
+        elif macd_bullish:
+            patterns.append((0.8, "超跌反弹(企稳)"))
+        else:
+            patterns.append((0.5, "超跌(未确认)"))
     
     if not patterns:
         return 0.0, "无模式"
@@ -1713,8 +1743,15 @@ def run_v22_scoring(data: dict) -> dict:
     ma20 = data.get('ma20', close)
     
     if result['tier'] == 'X':
-        result['action'] = '不买'
-        result['action_reason'] = '触发强制排除规则'
+        # v2.2r++: 超跌反弹例外 — 连续大跌但被模式检测到
+        if "超跌反弹" in result.get('pattern_name', ''):
+            result['action'] = '超跌反弹-观察'
+            result['action_reason'] = f"超跌反弹({result['pattern_name']})，{result['final_score']:.3f}分"
+            result['buy_price'] = f"{close:.2f}附近"
+            result['stop_loss'] = f"{data.get('low', close)*0.97:.2f}(-3%)"
+        else:
+            result['action'] = '不买'
+            result['action_reason'] = '触发强制排除规则'
     elif result['tier'] == 'S':
         if change_pct <= 5:
             result['action'] = '买'
