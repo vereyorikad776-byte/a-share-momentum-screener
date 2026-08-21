@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-enhanced_data_feed.py — 多源备选数据接口（整合 a-stock-data 精华）
+enhanced_data_feed.py — 多源备选数据接口
 
-数据源优先级：
-1. mootdx（通达信 TCP）— K线/五档/逐笔，不封IP
-2. 腾讯财经 — 实时价/PE/PB/市值/涨跌停，不封IP
+数据源：
+1. mootdx（通达信 TCP）— K线/五档/逐笔
+2. 腾讯财经 — 实时价/PE/PB/市值/涨跌停
 3. 百度股市通 — K线带MA5/10/20
 4. 新浪 — 复权因子/分钟K/实时价
-5. 东财（限流）— 资金流向/龙虎榜/研报/新闻（独有数据）
-6. 同花顺 — 热点/北向/一致预期
-
-防封策略：
-- 东财全部走 em_get()，内置串行限流（间隔≥1s+抖动）
-- 批量调用时调大 EM_MIN_INTERVAL
+5. 财联社 — 7×24实时电报
+6. Iwencai SkillHub — 25个官方API（新闻/公告/研报/板块/调研等）
+7. iFinD（付费保底）— 独有财务/资金流/龙虎榜
 """
 
 import socket
@@ -261,166 +258,18 @@ def apply_adjust(bars_df: pd.DataFrame, factors: list, kind: str = "qfq") -> pd.
     return df
 
 
-# ═══════════════════════════════════════════════════════════════
-# 5. 东财 — 统一限流入口（防封）
-# ═══════════════════════════════════════════════════════════════
-
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-
-EM_SESSION = requests.Session()
-EM_SESSION.headers.update({"User-Agent": UA})
-try:
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-    _em_adapter = HTTPAdapter(max_retries=Retry(
-        total=3, connect=3, backoff_factor=0.6,
-        status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"]))
-    EM_SESSION.mount("https://", _em_adapter)
-    EM_SESSION.mount("http://", _em_adapter)
-except Exception:
-    pass
-
-EM_MIN_INTERVAL = 1.0
-_em_last_call = [0.0]
-
-
-def em_get(url: str, params: dict = None, headers: dict = None, timeout: int = 15, **kwargs):
-    """东财统一请求 — 自动节流 + 复用 session"""
-    wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
-    if wait > 0:
-        time.sleep(wait + random.uniform(0.1, 0.5))
-    try:
-        return EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
-    finally:
-        _em_last_call[0] = time.time()
-
-
-def eastmoney_datacenter(report_name: str, columns: str = "ALL",
-                         filter_str: str = "", page_size: int = 50,
-                         sort_columns: str = "", sort_types: str = "-1") -> list:
-    """东财数据中心统一查询"""
-    params = {
-        "reportName": report_name, "columns": columns,
-        "filter": filter_str, "pageNumber": "1", "pageSize": str(page_size),
-        "sortColumns": sort_columns, "sortTypes": sort_types,
-        "source": "WEB", "client": "WEB",
-    }
-    r = em_get(DATACENTER_URL, params=params, timeout=15)
-    d = r.json()
-    if d.get("result") and d["result"].get("data"):
-        return d["result"]["data"]
-    return []
-
 
 # ═══════════════════════════════════════════════════════════════
-# 6. 东财 — 个股资金流向（分钟级）
-# ═══════════════════════════════════════════════════════════════
-
-def eastmoney_fund_flow_minute(code: str) -> list:
-    """个股资金流向 — 分钟级（超大/大/中/小单）"""
-    secid = em_secid(code)
-    url = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
-    params = {
-        "secid": secid, "fields1": "f1,f2,f3,f7",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-        "klt": "1",  # 1=1分钟
-    }
-    r = em_get(url, params=params, timeout=15)
-    d = r.json()
-    data = d.get("data", {})
-    klines = data.get("klines", [])
-    result = []
-    for line in klines:
-        parts = line.split(",")
-        if len(parts) >= 15:
-            result.append({
-                "time": parts[0],
-                "main_in": float(parts[1]),   # 主力净流入
-                "small_in": float(parts[2]),  # 小单净流入
-                "super_in": float(parts[5]),  # 超大单净流入
-                "big_in": float(parts[6]),    # 大单净流入
-                "mid_in": float(parts[7]),    # 中单净流入
-            })
-    return result
-
-
-# ═══════════════════════════════════════════════════════════════
-# 7. 东财 — 龙虎榜
+# 5. 龙虎榜 — 东财已移除，待接入iFinD替代
 # ═══════════════════════════════════════════════════════════════
 
 def dragon_tiger_board(code: str, trade_date: str = None, look_back: int = 30) -> dict:
-    """个股龙虎榜 — 上榜记录 + 买卖席位 TOP5"""
-    if trade_date is None:
-        trade_date = datetime.now().strftime("%Y-%m-%d")
-    ticker = norm_ticker(code)
-    filter_str = f'(SECURITY_CODE="{ticker}")'
-
-    data = eastmoney_datacenter(
-        "RPT_DMSK_TS", "ALL", filter_str, page_size=50,
-        sort_columns="TRADE_DATE", sort_types="-1"
-    )
-    if not data:
-        return {"records": [], "summary": None}
-
-    records = []
-    for row in data:
-        records.append({
-            "date": row.get("TRADE_DATE", ""),
-            "close": row.get("CLOSE_PRICE", 0),
-            "change_pct": row.get("CHANGE_RATE", 0),
-            "reason": row.get("EXPLANATION", ""),
-            "net_buy": row.get("NET_BUY_AMT", 0),
-            "buy_amt": row.get("BUY_AMT", 0),
-            "sell_amt": row.get("SELL_AMT", 0),
-        })
-
-    # 买卖席位
-    seats = []
-    for i in range(1, 6):
-        buy = row.get(f"BUY_AMT_{i}", 0)
-        sell = row.get(f"SELL_AMT_{i}", 0)
-        if buy or sell:
-            seats.append({
-                "seat": row.get(f"SEAT_NAME_{i}", ""),
-                "buy": buy,
-                "sell": sell,
-            })
-
-    return {
-        "records": records,
-        "seats": seats,
-        "summary": {
-            "total_net_buy": sum(r["net_buy"] for r in records),
-            "times": len(records),
-        }
-    }
-
+    """个股龙虎榜 — 东财已移除，待接入iFinD替代"""
+    return {"records": [], "summary": None, "note": "东财限流已移除，待iFinD接入"}
 
 def daily_dragon_tiger(trade_date: str = None, min_net_buy: float = None) -> list:
-    """全市场龙虎榜 — 当日所有上榜股票"""
-    if trade_date is None:
-        trade_date = datetime.now().strftime("%Y-%m-%d")
-    filter_str = f'(TRADE_DATE="{trade_date}")'
-    if min_net_buy:
-        filter_str += f"(NET_BUY_AMT>={min_net_buy})"
-
-    data = eastmoney_datacenter(
-        "RPT_DMSK_TS", "ALL", filter_str, page_size=200,
-        sort_columns="NET_BUY_AMT", sort_types="-1"
-    )
-    result = []
-    for row in data:
-        result.append({
-            "code": row.get("SECURITY_CODE", ""),
-            "name": row.get("SECURITY_NAME_ABBR", ""),
-            "close": row.get("CLOSE_PRICE", 0),
-            "change_pct": row.get("CHANGE_RATE", 0),
-            "net_buy": row.get("NET_BUY_AMT", 0),
-            "reason": row.get("EXPLANATION", ""),
-        })
-    return result
-
+    """全市场龙虎榜 — 东财已移除，待接入iFinD替代"""
+    return []
 
 # ═══════════════════════════════════════════════════════════════
 # 8. 财联社 — 7×24 实时电报（已测试 ✅ 正常）
@@ -748,13 +597,7 @@ if __name__ == "__main__":
     print(f"   共 {len(factors)} 条")
 
     # 4. 东财资金流向
-    print("\n4. 东财资金流向 (600519):")
-    try:
-        flow = eastmoney_fund_flow_minute("600519")
-        print(f"   共 {len(flow)} 条分钟数据")
-    except Exception as e:
-        print(f"   ⚠️ 东财限流: {type(e).__name__}")
-
+    print("\n4. 东财资金流向: 已移除（限流）")
     # 5. 财联社电报
     print("\n5. 财联社电报:")
     try:
