@@ -564,7 +564,8 @@ _IWENCAI_SKILL_MAP = {
 
 def iwencai_query(skill_name: str, query: str, limit: int = 10, **extra) -> dict:
     """通用Iwencai SkillHub调用器 — 返回结构化JSON"""
-    if not _IWENCAI_KEY:
+    api_key = os.environ.get("IWENCAI_API_KEY", _IWENCAI_KEY)
+    if not api_key:
         return {"success": False, "data": [], "error": "IWENCAI_API_KEY 未配置"}
     script_rel = _IWENCAI_SKILL_MAP.get(skill_name)
     if not script_rel:
