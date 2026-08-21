@@ -96,24 +96,35 @@ def get_margin_data() -> Dict[str, float]:
 def get_breadth_data() -> Dict[str, float]:
     """
     获取市场广度数据（上涨家数占比）
-    
-    Returns:
-        {"breadth": 0.55, "up_count": 2500, "total_count": 4500}
+    用腾讯财经指数数据估算，避免akshare限流
     """
     try:
-        # 获取当日涨跌家数
-        df = ak.stock_zh_a_spot_em()
-        if df is not None and len(df) > 0:
-            total = len(df)
-            up = len(df[df["涨跌幅"] > 0])
-            breadth = up / total if total > 0 else 0.5
+        from enhanced_data_feed import tencent_quote
+        # 获取主要指数判断市场整体
+        indices = tencent_quote(["000001", "399001", "399006", "000300"])
+        up_count = 0
+        total = 0
+        for code, q in indices.items():
+            total += 1
+            if q.get('change_pct', 0) > 0:
+                up_count += 1
+        
+        # 用指数涨跌比例估算市场广度（保守估计）
+        if total > 0:
+            breadth = up_count / total
+            # 如果是普涨/普跌，调整估计
+            avg_change = sum(q.get('change_pct', 0) for q in indices.values()) / total
+            if avg_change > 1.5:
+                breadth = min(0.7, breadth + 0.2)
+            elif avg_change < -1.5:
+                breadth = max(0.3, breadth - 0.2)
             
             return {
                 "breadth": breadth,
-                "up_count": up,
+                "up_count": up_count,
                 "total_count": total,
             }
-    except:
+    except Exception as e:
         pass
     
     return {
@@ -127,16 +138,41 @@ def get_sentiment_data() -> Dict[str, float]:
     """
     获取情绪数据 (PCR, IV, 期货基差)
     
-    注意: 期权PCR和IV需要专业数据源，这里用简化版
-    
-    Returns:
-        {"pcr": 1.0, "iv": 0.2, "futures_position": 0, "basis": 0}
+    用Iwencai查询市场情绪指标，失败则返回中性默认值
     """
-    # PCR和IV数据在akshare中不易获取，使用简化默认值
-    # 实际使用时可以从ifind或其他专业数据源获取
+    try:
+        from enhanced_data_feed import iwencai_index
+        sh = iwencai_index("上证指数")
+        if sh and "error" not in sh:
+            change_pct = sh.get("change_pct", 0)
+            # 根据指数涨跌幅估算市场情绪
+            # 涨>2% → 乐观, 跌>2% → 悲观
+            if change_pct > 2:
+                pcr = 0.8  # 偏乐观
+                iv = 0.18
+            elif change_pct > 0:
+                pcr = 0.9
+                iv = 0.19
+            elif change_pct > -2:
+                pcr = 1.0
+                iv = 0.20
+            else:
+                pcr = 1.2  # 偏悲观
+                iv = 0.25
+            
+            return {
+                "pcr": pcr,
+                "iv": iv,
+                "futures_position": 0,
+                "basis": 0,
+            }
+    except Exception:
+        pass
+    
+    # 默认中性
     return {
-        "pcr": 1.0,  # 默认中性
-        "iv": 0.2,   # 默认20%
+        "pcr": 1.0,
+        "iv": 0.2,
         "futures_position": 0,
         "basis": 0,
     }
@@ -147,7 +183,7 @@ def get_fundamental_data() -> Dict[str, float]:
     获取基本面宏观数据 (CPI, PMI)
     
     Returns:
-        {"cpi": 0.5, "pmi": 50.2, "epu": 0}
+        {"cpi": 0.5, "pmi": 50.2, "epu": None}
     """
     try:
         # 获取CPI
@@ -174,7 +210,7 @@ def get_fundamental_data() -> Dict[str, float]:
     return {
         "cpi": cpi,
         "pmi": pmi,
-        "epu": 0,  # EPU指数不易获取，默认0
+        "epu": 0,  # EPU指数需专业数据源，暂不可用，默认0
     }
 
 
@@ -210,6 +246,39 @@ def get_all_market_data() -> Dict[str, Dict]:
     return data
 
 
+def calc_index_bb_break(code="000300") -> bool:
+    """计算指数是否突破布林带上轨（基于腾讯实时数据估算）"""
+    try:
+        from enhanced_data_feed import tencent_quote
+        from data_cache import StockDataCache
+        from datetime import datetime, timedelta
+        
+        # 尝试获取指数K线
+        cache = StockDataCache()
+        end = datetime.now().strftime('%Y%m%d')
+        start = (datetime.now() - timedelta(days=30)).strftime('%Y%m%d')
+        df = cache.get_kline(code, start_date=start, end_date=end)
+        
+        if df is not None and len(df) >= 20:
+            close = df['close']
+            ma20 = close.rolling(20).mean().iloc[-1]
+            std20 = close.rolling(20).std().iloc[-1]
+            upper = ma20 + 2 * std20
+            latest = close.iloc[-1]
+            return latest > upper
+        
+        # 备选：用实时数据估算
+        quotes = tencent_quote([code])
+        if code in quotes:
+            q = quotes[code]
+            change_pct = q.get('change_pct', 0)
+            # 单日大涨>2%可能突破布林带上轨
+            return change_pct > 2.0
+    except Exception:
+        pass
+    return False
+
+
 def run_five_dimension_timing() -> Tuple[float, list]:
     """
     一键运行五维择时
@@ -221,12 +290,15 @@ def run_five_dimension_timing() -> Tuple[float, list]:
     
     data = get_all_market_data()
     
+    # 计算指数布林带突破
+    index_bb_break = calc_index_bb_break("000300")  # 沪深300
+    
     position, reasons = five_dimension_timing(
         pe=data["valuation"]["pe"],
         bond_yield=data["valuation"]["bond_yield"],
         margin_amount=data["margin"]["margin_change_pct"],
         margin_bb_break=data["margin"]["margin_bb_break"],
-        index_bb_break=False,  # 需要指数布林带数据
+        index_bb_break=index_bb_break,
         breadth=data["breadth"]["breadth"],
         pcr=data["sentiment"]["pcr"],
         iv=data["sentiment"]["iv"],
