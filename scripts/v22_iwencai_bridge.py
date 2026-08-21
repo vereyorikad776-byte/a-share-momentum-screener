@@ -446,29 +446,38 @@ def iwencai_combo_screen(
 ) -> dict:
     """
     问财组合拳 — 三步选股:
-    1. 问财选板块: 找出当前最强N个板块
+    1. 问财选板块: 找出当前最强N个板块 (Iwencai优先，失败则用akshare fallback)
     2. 问财选A股: 在强势板块中自然语言筛候选
     3. 返回候选列表 + 板块信息，供v22评分
-
-    Args:
-        sector_period: 板块排序周期 ("近一周"/"近一月"/"本日")
-        sector_top_n: 取前N个最强板块
-        stock_query: 选股条件 (如 "MACD金叉 成交额大于5000万")
-                      为None时自动构造板块内选股
-        stock_limit: 每个板块筛几只
-
-    Returns: {
-        "sectors": [{"name": "", "change_pct": 0, "code": ""}, ...],
-        "candidates": [{"name": "", "code": "", "sector": "", "iwencai_raw": {}}, ...],
-        "meta": {"sector_period": ..., "total_candidates": ...}
-    }
     """
-    # Step 1: 选板块
+    # Step 1: 选板块 — Iwencai优先，失败则用akshare fallback
     sectors = iwencai_sector_ranking(sector_period, limit=sector_top_n * 2)
+    
+    # Fallback: Iwencai失败时用akshare板块数据
+    if not sectors:
+        print("  ⚠ Iwencai板块API失效，切换akshare fallback...")
+        try:
+            import akshare as ak
+            # 行业板块
+            df = ak.stock_board_industry_name_em()
+            if df is not None and len(df) > 0:
+                df = df.sort_values("涨跌幅", ascending=False)
+                for _, row in df.head(sector_top_n * 2).iterrows():
+                    name = row.get("板块名称", "")
+                    change = row.get("涨跌幅", 0)
+                    if name and change:
+                        sectors.append({
+                            "指数简称": name,
+                            "涨跌幅": change,
+                            "指数代码": "",
+                        })
+        except Exception as e:
+            print(f"  ⚠ akshare fallback也失败: {e}")
+    
     top_sectors = []
     for s in sectors[:sector_top_n]:
-        name = s.get("指数简称", s.get("name", ""))
-        change = s.get(f"涨跌幅", s.get(f"涨跌幅[20260814-20260820]", 0))
+        name = s.get("指数简称", s.get("name", s.get("板块名称", "")))
+        change = s.get("涨跌幅", s.get(f"涨跌幅[20260814-20260820]", s.get("change_pct", 0)))
         code = s.get("指数代码", s.get("code", ""))
         if name:
             top_sectors.append({"name": name, "change_pct": change, "code": code})
