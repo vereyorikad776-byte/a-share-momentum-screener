@@ -438,6 +438,24 @@ def batch_iwencai_enhance(stock_list: List[dict]) -> Dict[str, dict]:
 # 问财组合拳: 板块 → 选股 → 评分
 # ═══════════════════════════════════════════════════════════════
 
+# ── 板块缓存（15分钟）避免频繁请求 ──
+_SECTOR_CACHE = {"data": None, "ts": 0, "ttl": 900}
+
+def _get_cached_sectors(force_refresh=False):
+    """获取板块数据（带缓存）"""
+    import time
+    now = time.time()
+    if not force_refresh and _SECTOR_CACHE["data"] and (now - _SECTOR_CACHE["ts"]) < _SECTOR_CACHE["ttl"]:
+        return _SECTOR_CACHE["data"]
+    return None
+
+def _set_cached_sectors(data):
+    """设置缓存"""
+    import time
+    _SECTOR_CACHE["data"] = data
+    _SECTOR_CACHE["ts"] = time.time()
+
+
 def iwencai_combo_screen(
     sector_period: str = "近一周",
     sector_top_n: int = 3,
@@ -450,29 +468,63 @@ def iwencai_combo_screen(
     2. 问财选A股: 在强势板块中自然语言筛候选
     3. 返回候选列表 + 板块信息，供v22评分
     """
-    # Step 1: 选板块 — Iwencai优先，失败则用akshare fallback
-    sectors = iwencai_sector_ranking(sector_period, limit=sector_top_n * 2)
+    # Step 1: 选板块 — 先读缓存
+    cached = _get_cached_sectors()
+    if cached:
+        sectors = cached
+        print("  📦 使用缓存板块数据")
+    else:
+        # Iwencai优先
+        sectors = iwencai_sector_ranking(sector_period, limit=sector_top_n * 2)
+        
+        # Fallback: Iwencai失败时用akshare
+        if not sectors:
+            print("  ⚠ Iwencai板块API失效，切换akshare fallback...")
+            try:
+                import akshare as ak
+                # 行业板块
+                df = ak.stock_board_industry_name_em()
+                if df is not None and len(df) > 0:
+                    # 宽松字段匹配
+                    change_col = None
+                    for col in df.columns:
+                        if '涨幅' in str(col) or 'change' in str(col).lower():
+                            change_col = col
+                            break
+                    if change_col:
+                        df = df.sort_values(change_col, ascending=False)
+                    
+                    name_col = None
+                    for col in df.columns:
+                        if '名称' in str(col) or 'name' in str(col).lower():
+                            name_col = col
+                            break
+                    
+                    for _, row in df.head(sector_top_n * 3).iterrows():
+                        name = row.get(name_col, "") if name_col else ""
+                        change = row.get(change_col, 0) if change_col else 0
+                        if name:
+                            sectors.append({
+                                "指数简称": name,
+                                "涨跌幅": float(change) if change else 0,
+                                "指数代码": "",
+                            })
+                    _set_cached_sectors(sectors)
+            except Exception as e:
+                print(f"  ⚠ akshare fallback也失败: {e}")
+        else:
+            _set_cached_sectors(sectors)
     
-    # Fallback: Iwencai失败时用akshare板块数据
+    # 如果没有数据，用硬编码热门板块兜底
     if not sectors:
-        print("  ⚠ Iwencai板块API失效，切换akshare fallback...")
-        try:
-            import akshare as ak
-            # 行业板块
-            df = ak.stock_board_industry_name_em()
-            if df is not None and len(df) > 0:
-                df = df.sort_values("涨跌幅", ascending=False)
-                for _, row in df.head(sector_top_n * 2).iterrows():
-                    name = row.get("板块名称", "")
-                    change = row.get("涨跌幅", 0)
-                    if name and change:
-                        sectors.append({
-                            "指数简称": name,
-                            "涨跌幅": change,
-                            "指数代码": "",
-                        })
-        except Exception as e:
-            print(f"  ⚠ akshare fallback也失败: {e}")
+        print("  ⚠ 所有数据源均失败，使用默认热门板块...")
+        sectors = [
+            {"指数简称": "半导体", "涨跌幅": 0, "指数代码": ""},
+            {"指数简称": "新能源", "涨跌幅": 0, "指数代码": ""},
+            {"指数简称": "人工智能", "涨跌幅": 0, "指数代码": ""},
+            {"指数简称": "医药", "涨跌幅": 0, "指数代码": ""},
+            {"指数简称": "消费电子", "涨跌幅": 0, "指数代码": ""},
+        ]
     
     top_sectors = []
     for s in sectors[:sector_top_n]:
