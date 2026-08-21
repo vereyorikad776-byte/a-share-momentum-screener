@@ -694,7 +694,10 @@ def step3_technical_score(data: dict) -> Tuple[float, List[str]]:
     
     # === v2.2r 新增: 冲高回落检测 (2026-08-20教训) ===
     # 早盘急拉后回落 = 拉高出货信号
-    if high > close and high > open_price:
+    # 仅在振幅>3%时检测，避免低振幅正常波动被误判
+    amplitude = (high - low) / open_price * 100 if open_price > 0 else 0
+    
+    if amplitude > 3 and high > close and high > open_price:
         pullback_from_high = (high - close) / high * 100
         if pullback_from_high >= 5:
             # 冲高回落超过5%
@@ -704,7 +707,7 @@ def step3_technical_score(data: dict) -> Tuple[float, List[str]]:
             score -= 1.5
             reasons.append(f"冲高回落{pullback_from_high:.1f}%")
         
-        # 收盘价位置检测
+        # 收盘价位置检测（仅振幅>3%时）
         day_range = high - low
         if day_range > 0:
             close_position = (close - low) / day_range
