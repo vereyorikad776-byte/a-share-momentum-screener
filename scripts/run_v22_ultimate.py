@@ -316,10 +316,67 @@ def run_backtest(days: int = 20) -> None:
         print(f"  {pattern}: {data['rate']*100:.1f}% ({data['hit']}/{data['count']})")
 
 
+def run_iwencai_combo():
+    """问财组合拳 — 板块→选股→评分"""
+    print(f"\n{'='*60}")
+    print(f"问财组合拳选股")
+    print(f"{'='*60}")
+
+    from v22_iwencai_bridge import iwencai_combo_screen
+
+    # Step 1: 选板块
+    print("\nStep 1: 问财选板块 — 近一周最强板块 TOP3")
+    combo = iwencai_combo_screen(
+        sector_period="近一周",
+        sector_top_n=3,
+        stock_query="成交额大于5000万",
+        stock_limit=5,
+    )
+
+    print(f"\n强势板块:")
+    for s in combo["sectors"]:
+        print(f"  📈 {s['name']}: {s['change_pct']:+.2f}%")
+
+    # Step 2: 候选票
+    candidates = combo["candidates"]
+    print(f"\nStep 2: 问财选A股 — 候选票 {len(candidates)}只")
+
+    # Step 3: v22评分
+    print(f"\nStep 3: v22增强评分")
+    results = []
+    for c in candidates[:15]:  # 最多评15只
+        name = c["name"]
+        code = c["code"]
+        sector = c["sector"]
+        print(f"\n  [{len(results)+1}] {name}({code}) — {sector}")
+        try:
+            result = run_single_stock(code, name)
+            if result:
+                results.append({"code": code, "name": name, "result": result, "sector": sector})
+        except Exception as e:
+            print(f"    ⚠ 评分失败: {e}")
+
+    # 排序输出
+    if results:
+        results.sort(key=lambda x: x["result"].get("final_score", 0), reverse=True)
+        print(f"\n{'='*60}")
+        print(f"问财组合拳 TOP5 推荐")
+        print(f"{'='*60}")
+        for i, r in enumerate(results[:5], 1):
+            res = r["result"]
+            grade = res.get("grade", "X")
+            score = res.get("final_score", 0)
+            action = res.get("action", "观望")
+            print(f"  {i}. {r['name']}({r['code']}) — {r['sector']}")
+            print(f"     评级: {grade} | 得分: {score:.3f} | 建议: {action}")
+    else:
+        print("\n⚠ 无有效评分结果")
+
+
 def main():
     parser = argparse.ArgumentParser(description=f"A股动量选股系统 终极版 {VERSION}")
-    parser.add_argument("--mode", choices=["single", "scan", "check", "plan", "report", "backtest", "market", "paper"],
-                       default="single", help="运行模式 (single/单票, scan/扫描, check/持仓检查, plan/交易计划, report/学习报告, backtest/回测, market/五维择时, paper/模拟盘)")
+    parser.add_argument("--mode", choices=["single", "scan", "check", "plan", "report", "backtest", "market", "paper", "iwencai-combo"],
+                       default="single", help="运行模式 (single/单票, scan/扫描, check/持仓检查, plan/交易计划, report/学习报告, backtest/回测, market/五维择时, paper/模拟盘, iwencai-combo/问财组合拳)")
     parser.add_argument("--code", help="股票代码（单票模式）")
     parser.add_argument("--name", help="股票名称（单票模式）")
     parser.add_argument("--cash", type=float, default=100000, help="可用现金（计划模式）")
@@ -362,6 +419,9 @@ def main():
     
     elif args.mode == "paper":
         run_paper_trade()
+    
+    elif args.mode == "iwencai-combo":
+        run_iwencai_combo()
 
 
 def run_market_timing():

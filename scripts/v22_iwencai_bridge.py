@@ -7,6 +7,7 @@ v22_iwencai_bridge.py — v22评分系统 × Iwencai SkillHub 桥接层
 - 机构面新增: insresearch/management → 机构关注度/管理层稳定性
 - 事件面新增: event → 重大事项/重组/并购
 - 基本面增强: finance/industry/business → 财务数据/行业PE/主营业务
+- 选股增强: 问财选板块 + 问财选A股 → 热点板块/自然语言筛候选
 
 设计原则:
 1. 增强不替代: Iwencai数据作为补充，原有技术面/情绪面/资金面不变
@@ -14,10 +15,23 @@ v22_iwencai_bridge.py — v22评分系统 × Iwencai SkillHub 桥接层
 3. 报告详细: 每只票输出"为什么给这个分"的分项理由
 """
 
+import os
 import sys
 import json
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
+
+# ── 自动读取 ~/.bashrc 中的 IWENCAI_API_KEY ──
+if not os.environ.get("IWENCAI_API_KEY"):
+    try:
+        with open(os.path.expanduser("~/.bashrc"), "r") as f:
+            for line in f:
+                if line.strip().startswith("export IWENCAI_API_KEY="):
+                    key = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    os.environ["IWENCAI_API_KEY"] = key
+                    break
+    except Exception:
+        pass
 
 # 导入enhanced_data_feed中的Iwencai快捷函数
 sys.path.insert(0, "/root/.openclaw/workspace/skills/ifind-momentum-screener/scripts")
@@ -25,7 +39,7 @@ from enhanced_data_feed import (
     iwencai_news, iwencai_announcement, iwencai_report,
     iwencai_insresearch, iwencai_management, iwencai_event,
     iwencai_finance, iwencai_industry_pe, iwencai_business,
-    iwencai_stock_screen,
+    iwencai_stock_screen, iwencai_sector_ranking,
 )
 
 
@@ -418,6 +432,86 @@ def batch_iwencai_enhance(stock_list: List[dict]) -> Dict[str, dict]:
                 "total_iwencai": 0.0,
             }
     return results
+
+
+# ═══════════════════════════════════════════════════════════════
+# 问财组合拳: 板块 → 选股 → 评分
+# ═══════════════════════════════════════════════════════════════
+
+def iwencai_combo_screen(
+    sector_period: str = "近一周",
+    sector_top_n: int = 3,
+    stock_query: str = None,
+    stock_limit: int = 10,
+) -> dict:
+    """
+    问财组合拳 — 三步选股:
+    1. 问财选板块: 找出当前最强N个板块
+    2. 问财选A股: 在强势板块中自然语言筛候选
+    3. 返回候选列表 + 板块信息，供v22评分
+
+    Args:
+        sector_period: 板块排序周期 ("近一周"/"近一月"/"本日")
+        sector_top_n: 取前N个最强板块
+        stock_query: 选股条件 (如 "MACD金叉 成交额大于5000万")
+                      为None时自动构造板块内选股
+        stock_limit: 每个板块筛几只
+
+    Returns: {
+        "sectors": [{"name": "", "change_pct": 0, "code": ""}, ...],
+        "candidates": [{"name": "", "code": "", "sector": "", "iwencai_raw": {}}, ...],
+        "meta": {"sector_period": ..., "total_candidates": ...}
+    }
+    """
+    # Step 1: 选板块
+    sectors = iwencai_sector_ranking(sector_period, limit=sector_top_n * 2)
+    top_sectors = []
+    for s in sectors[:sector_top_n]:
+        name = s.get("指数简称", s.get("name", ""))
+        change = s.get(f"涨跌幅", s.get(f"涨跌幅[20260814-20260820]", 0))
+        code = s.get("指数代码", s.get("code", ""))
+        if name:
+            top_sectors.append({"name": name, "change_pct": change, "code": code})
+
+    # Step 2: 板块内选股
+    all_candidates = []
+    for sec in top_sectors:
+        sec_name = sec["name"]
+        # 构造查询: "板块名 + 用户条件" 或默认 "板块名 涨幅大于0"
+        if stock_query:
+            q = f"{sec_name}板块 {stock_query}"
+        else:
+            q = f"{sec_name}板块 近5日涨幅大于0"
+
+        stocks = iwencai_stock_screen(q, limit=stock_limit)
+        for st in stocks:
+            all_candidates.append({
+                "name": st.get("股票简称", st.get("name", "")),
+                "code": st.get("股票代码", st.get("code", "")).replace(".SH", "").replace(".SZ", ""),
+                "sector": sec_name,
+                "sector_change": sec["change_pct"],
+                "iwencai_raw": st,
+            })
+
+    # 去重 (同一只票可能在多个板块)
+    seen = set()
+    unique = []
+    for c in all_candidates:
+        key = c["code"]
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(c)
+
+    return {
+        "sectors": top_sectors,
+        "candidates": unique,
+        "meta": {
+            "sector_period": sector_period,
+            "sector_top_n": sector_top_n,
+            "stock_limit_per_sector": stock_limit,
+            "total_candidates": len(unique),
+        },
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
