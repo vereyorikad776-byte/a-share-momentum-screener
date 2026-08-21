@@ -36,9 +36,9 @@ RISK_CONFIG = {
     "no_average_down": True,            # 禁止摊平
     # 阶梯止盈
     "take_profit": {
-        "3pct": {"trigger": 0.03, "retrace": 0.03},
-        "6pct": {"trigger": 0.06, "retrace": 0.05},
-        "10pct": {"trigger": 0.10, "retrace": 0.08},
+        "10pct": {"trigger": 0.10, "retrace": 0.05},
+        "15pct": {"trigger": 0.15, "retrace": 0.08},
+        "20pct": {"trigger": 0.20, "retrace": 0.10},
     },
     "fixed_take_profit": 0.20,          # 固定止盈20%
 }
@@ -202,29 +202,29 @@ def check_take_profit(position: dict) -> Optional[str]:
     # 阶梯止盈检查
     tp_config = RISK_CONFIG["take_profit"]
     
-    # 第三档: 浮盈>10%, 回撤8%
-    if max_gain >= tp_config["10pct"]["trigger"]:
+    # 第三档: 浮盈>20%, 回撤10%
+    if max_gain >= tp_config["20pct"]["trigger"]:
         if level < 3:
             position["take_profit_level"] = 3
         retrace = highest - current
-        if retrace / buy >= tp_config["10pct"]["retrace"]:
-            return f"止盈三档: 最高盈利{max_gain*100:.1f}%, 回撤至{current_gain*100:.1f}%"
+        if retrace / highest >= tp_config["20pct"]["retrace"]:
+            return f"止盈三档: 最高盈利{max_gain*100:.1f}%, 回撤{retrace/highest*100:.1f}%"
     
-    # 第二档: 浮盈>6%, 回撤5%
-    elif max_gain >= tp_config["6pct"]["trigger"]:
+    # 第二档: 浮盈>15%, 回撤8%
+    elif max_gain >= tp_config["15pct"]["trigger"]:
         if level < 2:
             position["take_profit_level"] = 2
         retrace = highest - current
-        if retrace / buy >= tp_config["6pct"]["retrace"]:
-            return f"止盈二档: 最高盈利{max_gain*100:.1f}%, 回撤至{current_gain*100:.1f}%"
+        if retrace / highest >= tp_config["15pct"]["retrace"]:
+            return f"止盈二档: 最高盈利{max_gain*100:.1f}%, 回撤{retrace/highest*100:.1f}%"
     
-    # 第一档: 浮盈>3%, 回撤3%
-    elif max_gain >= tp_config["3pct"]["trigger"]:
+    # 第一档: 浮盈>10%, 回撤5%
+    elif max_gain >= tp_config["10pct"]["trigger"]:
         if level < 1:
             position["take_profit_level"] = 1
         retrace = highest - current
-        if retrace / buy >= tp_config["3pct"]["retrace"]:
-            return f"止盈一档: 最高盈利{max_gain*100:.1f}%, 回撤至{current_gain*100:.1f}%"
+        if retrace / highest >= tp_config["10pct"]["retrace"]:
+            return f"止盈一档: 最高盈利{max_gain*100:.1f}%, 回撤{retrace/highest*100:.1f}%"
     
     # 固定止盈20%
     if current_gain >= RISK_CONFIG["fixed_take_profit"]:

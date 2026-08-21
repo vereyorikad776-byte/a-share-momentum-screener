@@ -77,28 +77,21 @@ def run_single_stock(code: str, name: str, data: dict = None) -> dict:
     # 如果没有提供数据，尝试从DuckDB获取
     if data is None:
         from data_cache import StockDataCache
+        from data_preparation import prepare_scoring_data, enrich_with_tencent
         from datetime import datetime, timedelta
         cache = StockDataCache()
         end_date = datetime.now().strftime('%Y%m%d')
-        start_date = (datetime.now() - timedelta(days=60)).strftime('%Y%m%d')
+        start_date = (datetime.now() - timedelta(days=90)).strftime('%Y%m%d')
+        print(f"📥 {code} 本地无缓存，从 akshare 拉取 {start_date}~{end_date} ...")
         df = cache.get_kline(code, start_date=start_date, end_date=end_date)
         if df is not None and len(df) > 0:
-            latest = df.iloc[-1]
-            data = {
-                'code': code,
-                'name': name,
-                'close': float(latest['close']),
-                'open': float(latest['open']),
-                'high': float(latest['high']),
-                'low': float(latest['low']),
-                'volume': float(latest['volume']),
-                'amount': float(latest.get('amount', 0)),
-                'prev_close': float(df.iloc[-2]['close']) if len(df) > 1 else float(latest['close']),
-            }
-            # 计算均线
-            data['ma5'] = float(df['close'].rolling(5).mean().iloc[-1])
-            data['ma10'] = float(df['close'].rolling(10).mean().iloc[-1])
-            data['ma20'] = float(df['close'].rolling(20).mean().iloc[-1])
+            data = prepare_scoring_data(code, name, df)
+            if data:
+                data = enrich_with_tencent(data)
+                print(f"✅ 数据准备完成: {len(df)}根K线 | MACD={data['macd']:.3f} RSI={data['rsi6']:.1f} KDJ_K={data['kdj_k']:.1f} 量比={data['volume_ratio']:.2f}")
+            else:
+                print(f"⚠ 数据不足（需≥30根K线），无法评分")
+                return None
         else:
             print(f"⚠ 无法获取 {code} 的历史数据，请提供实时数据")
             return None
