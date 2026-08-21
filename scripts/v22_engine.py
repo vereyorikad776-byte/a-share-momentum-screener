@@ -1742,6 +1742,12 @@ def run_v22_scoring(data: dict) -> dict:
             result['action_reason'] = f'A级但已涨{change_pct:.1f}%过高，等回调到MA10({ma10:.2f})'
             result['buy_price'] = f"{ma10:.2f}附近"
             result['stop_loss'] = f"{ma20:.2f}"
+    elif result['tier'] == 'B' and result['final_score'] >= 0.7:
+        # B+级: 高得分B级，可观察择机买入
+        result['action'] = '观察'
+        result['action_reason'] = f"B+级({result['final_score']:.3f}分)，可观察择机买入"
+        result['buy_price'] = f"{close * 0.99:.2f}附近(回踩确认)"
+        result['stop_loss'] = f"{ma20:.2f}"
     elif result['tier'] == 'B':
         result['action'] = '等'
         result['action_reason'] = 'B级观望，等 stronger 信号'
