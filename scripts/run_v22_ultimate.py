@@ -357,11 +357,12 @@ def run_iwencai_combo():
         print(f"{'='*60}")
         for i, r in enumerate(results[:5], 1):
             res = r["result"]
-            grade = res.get("grade", "X")
+            # v22_engine.py 返回的是 'tier' 不是 'grade'
+            tier = res.get("tier", res.get("grade", "X"))
             score = res.get("final_score", 0)
             action = res.get("action", "观望")
             print(f"  {i}. {r['name']}({r['code']}) — {r['sector']}")
-            print(f"     评级: {grade} | 得分: {score:.3f} | 建议: {action}")
+            print(f"     评级: {tier} | 得分: {score:.3f} | 建议: {action}")
     else:
         print("\n⚠ 无有效评分结果")
 
