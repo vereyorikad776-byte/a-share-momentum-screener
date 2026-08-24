@@ -171,7 +171,37 @@ class ScoringEngineV31:
         return details
     
     def _get_financial_data(self, code: str) -> Dict:
-        """获取财务数据，优先iFinD"""
+        """获取财务数据，多源优先级：FTShare → tushare Pro → iFinD → 默认"""
+        # 1. 先尝试 FTShare（免费，最稳定）
+        try:
+            from ftshare_adapter import get_full_financial_profile
+            data = get_full_financial_profile(code)
+            if data and 'error' not in data:
+                mapped = {
+                    'source': 'ftshare',
+                    'roe': data.get('roe'),
+                    'revenue_growth': data.get('total_revenue_yoy'),
+                    'profit_growth': data.get('net_profit_yoy'),
+                    'eps': data.get('eps'),
+                    'debt_ratio': data.get('debt_ratio'),
+                    'operating_cashflow': data.get('operating_cashflow'),
+                }
+                return mapped
+        except Exception:
+            pass
+        
+        # 2. 尝试 tushare Pro（需要token）
+        try:
+            from tushare_adapter import get_tushare_adapter
+            adapter = get_tushare_adapter()
+            if adapter.is_pro_available():
+                data = adapter.get_financial_data(code)
+                if data and 'error' not in data:
+                    return data
+        except Exception:
+            pass
+        
+        # 3. 再尝试 iFinD（付费数据源）
         try:
             from ifind_adapter import get_financial_data
             data = get_financial_data(code)
@@ -180,7 +210,7 @@ class ScoringEngineV31:
         except Exception:
             pass
         
-        # 回退到默认值
+        # 4. 回退到默认值
         return {'source': 'default'}
     
     def _score_finance(self, code: str, quote) -> Dict:

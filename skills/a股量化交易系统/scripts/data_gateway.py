@@ -14,6 +14,8 @@ from enum import Enum
 
 class DataSource(Enum):
     TENCENT = "tencent"
+    TUSHARE = "tushare"
+    MOOTDX = "mootdx"
     IFIND = "ifind"
     BAOSTOCK = "baostock"
     AKSHARE = "akshare"
@@ -53,9 +55,11 @@ class DataGateway:
     """统一数据网关"""
     
     def __init__(self):
-        # 数据源优先级：免费先用，付费的iFinD放最后作为增强
+        # 数据源优先级：实时行情用最快最稳的
         self.source_priority = [
-            DataSource.TENCENT,    # 免费实时行情
+            DataSource.TUSHARE,    # 免费实时行情（盘口数据）
+            DataSource.TENCENT,    # 免费实时行情（速度快）
+            DataSource.MOOTDX,     # 通达信TCP（本地环境最快）
             DataSource.BAOSTOCK,   # 免费历史数据
             DataSource.AKSHARE,    # 免费备用
             DataSource.IFIND       # 付费增强（最后兜底）
@@ -93,7 +97,11 @@ class DataGateway:
         # 尝试各数据源
         for source in self.source_priority:
             try:
-                if source == DataSource.TENCENT:
+                if source == DataSource.TUSHARE:
+                    quote = self._fetch_tushare(code)
+                elif source == DataSource.MOOTDX:
+                    quote = self._fetch_mootdx(code)
+                elif source == DataSource.TENCENT:
                     quote = self._fetch_tencent(code)
                 elif source == DataSource.IFIND:
                     quote = self._fetch_ifind(code)
@@ -113,6 +121,71 @@ class DataGateway:
                 continue
                 
         return None
+    
+    def _fetch_tushare(self, code: str) -> Optional[StockQuote]:
+        """从tushare获取实时行情"""
+        try:
+            from tushare_adapter import get_tushare_adapter
+            adapter = get_tushare_adapter()
+            
+            if not adapter.is_available():
+                return None
+            
+            data = adapter.get_realtime_quote(code)
+            if not data:
+                return None
+            
+            return StockQuote(
+                code=code,
+                name=data.get('name', ''),
+                price=float(data.get('price', 0)),
+                change_pct=float(data.get('change_pct', 0)),
+                volume=int(data.get('volume', 0)),
+                turnover=float(data.get('amount', 0)),
+                bid1=float(data.get('bid1', 0)),
+                ask1=float(data.get('ask1', 0)),
+                high=float(data.get('high', 0)),
+                low=float(data.get('low', 0)),
+                open=float(data.get('open', 0)),
+                pre_close=float(data.get('pre_close', 0)),
+                timestamp=data.get('timestamp', time.strftime('%Y-%m-%d %H:%M:%S')),
+                source='tushare'
+            )
+        except Exception as e:
+            print(f"tushare获取失败: {e}")
+            return None
+    
+    def _fetch_mootdx(self, code: str) -> Optional[StockQuote]:
+        """从mootdx（通达信）获取实时行情"""
+        try:
+            from mootdx_adapter import get_mootdx_adapter
+            adapter = get_mootdx_adapter()
+            
+            if not adapter.is_available():
+                return None
+            
+            data = adapter.get_realtime_quote(code)
+            if not data:
+                return None
+            
+            return StockQuote(
+                code=code,
+                name='',  # mootdx可能不返回名称
+                price=float(data.get('price', 0)),
+                change_pct=float(data.get('change_pct', 0)),
+                volume=int(data.get('volume', 0)),
+                turnover=float(data.get('amount', 0)),
+                bid1=0, ask1=0,
+                high=float(data.get('high', 0)),
+                low=float(data.get('low', 0)),
+                open=float(data.get('open', 0)),
+                pre_close=float(data.get('pre_close', 0)),
+                timestamp=data.get('timestamp', time.strftime('%Y-%m-%d %H:%M:%S')),
+                source='mootdx'
+            )
+        except Exception as e:
+            print(f"mootdx获取失败: {e}")
+            return None
     
     def _fetch_tencent(self, code: str) -> Optional[StockQuote]:
         """从腾讯财经获取实时行情"""
