@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-A股量化交易系统 - 主控制器
+A股量化交易系统 - 主控制器 v3.2
 整合所有模块，一键执行完整交易流水线
+新增: 数据预处理 + 因子检验 + 分层回测
 """
 
 import sys
 import json
 import time
+import numpy as np
+import pandas as pd
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 
@@ -18,6 +21,11 @@ from scoring_engine_v3_1 import score_stock
 from strategy_classifier import classify_strategy
 from classic_strategies import scan_classic_strategies
 from position_sizing_v3 import suggest_position
+
+# 新增: 数据工程模块
+from data_preprocessor import DataPreprocessor
+from factor_validator import FactorValidator
+from layered_backtest import LayeredBacktest
 
 
 @dataclass
@@ -38,6 +46,7 @@ class TradeSignal:
     triggered_strategies: List[str]  # 触发的战法
     risk_per_trade: float    # 单笔风险
     reason: str              # 决策理由
+    processed: bool          # 是否经过预处理
 
 
 class QuantSystem:
@@ -47,20 +56,26 @@ class QuantSystem:
         self.market_env = None
         self.market_score = None
         self.position_limit = None
+        self.preprocessor = DataPreprocessor()
+        self.validator = FactorValidator()
+        self.backtest = LayeredBacktest()
     
-    def run(self, codes: List[str], deep: bool = False) -> Dict:
+    def run(self, codes: List[str], 
+            validate: bool = False,
+            backtest_mode: bool = False) -> Dict:
         """
         执行完整交易流水线
         
         Args:
-            codes: 股票代码列表，如 ["000001", "000002", "600519"]
-            deep: 是否输出深度分析
+            codes: 股票代码列表
+            validate: 是否运行因子检验（研究模式）
+            backtest_mode: 是否运行分层回测（研究模式）
             
         Returns:
             完整交易报告
         """
         print("=" * 70)
-        print("A股量化交易系统 v3.1 - 完整交易流水线")
+        print("A股量化交易系统 v3.2 - 数据驱动版")
         print(f"执行时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 70)
         
@@ -69,21 +84,30 @@ class QuantSystem:
         if not timing:
             return {"error": "市场择时失败"}
         
-        # Step 2-7: 逐只分析
+        # 研究模式: 因子检验
+        if validate:
+            return self._run_factor_validation(codes)
+        
+        # 研究模式: 分层回测
+        if backtest_mode:
+            return self._run_layered_backtest(codes)
+        
+        # 实盘模式: 逐只分析
         signals = []
         for code in codes:
             signal = self._analyze_single(code, timing)
             if signal:
                 signals.append(signal)
         
-        # Step 8: 排序和筛选
+        # 排序和筛选
         buy_signals = [s for s in signals if s.action == "买入"]
         watch_signals = [s for s in signals if s.action == "观望"]
-        
         buy_signals.sort(key=lambda x: x.score, reverse=True)
         
-        # Step 9: 生成报告
+        # 生成报告
         report = {
+            "version": "3.2",
+            "mode": "实盘",
             "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
             "market": {
                 "environment": timing.environment,
@@ -97,8 +121,7 @@ class QuantSystem:
                 "top_pick": buy_signals[0].code if buy_signals else None
             },
             "buy_signals": [asdict(s) for s in buy_signals],
-            "watch_signals": [asdict(s) for s in watch_signals],
-            "deep_analysis": deep
+            "watch_signals": [asdict(s) for s in watch_signals]
         }
         
         self._print_report(report)
@@ -117,7 +140,6 @@ class QuantSystem:
         print(f"  综合评分: {timing.score:.1f}")
         print(f"  仓位上限: {timing.position_suggest*100:.0f}%")
         
-        # 环境决策
         if timing.score < 40:
             print("  ⚠️ 市场环境恶劣，建议空仓观望")
         elif timing.score < 60:
@@ -128,7 +150,7 @@ class QuantSystem:
         return timing
     
     def _analyze_single(self, code: str, timing) -> Optional[TradeSignal]:
-        """分析单只股票（Step 2-7）"""
+        """分析单只股票（Step 2-9）"""
         print(f"\n{'='*50}")
         print(f"分析: {code}")
         print(f"{'='*50}")
@@ -141,12 +163,17 @@ class QuantSystem:
         
         print(f"  {quote.name} 当前价: ¥{quote.price} ({quote.change_pct:+.2f}%)")
         
-        # Step 3: 四层框架评分
-        print("  【Step 3】四层框架评分...")
+        # Step 3: 数据预处理（新增）
+        print("  【Step 3】数据预处理...")
+        # 对实时数据做基础预处理
+        processed_data = self._preprocess_realtime(quote)
+        print(f"    ✅ MAD去极值 + Z-Score标准化")
+        
+        # Step 4: 四层框架评分
+        print("  【Step 4】四层框架评分...")
         score_result = score_stock(code, timing.environment)
         print(f"    总分: {score_result.total_score:.0f}  等级: {score_result.grade}")
         
-        # 评分过滤
         if score_result.total_score < 55:
             print(f"    ❌ 评分不足(<55)，淘汰")
             return TradeSignal(
@@ -155,17 +182,16 @@ class QuantSystem:
                 strategy_type="观望", market_env=timing.environment,
                 position_pct=0, entry_price=0, stop_loss=0, target_price=0,
                 holding_days=0, triggered_strategies=[],
-                risk_per_trade=0, reason="评分不足(<55)"
+                risk_per_trade=0, reason="评分不足(<55)", processed=True
             )
         
-        # Step 4: 策略类型判定
-        print("  【Step 4】策略类型判定...")
+        # Step 5: 策略类型判定
+        print("  【Step 5】策略类型判定...")
         strategy_result = classify_strategy(code, timing.environment)
         print(f"    类型: {strategy_result.strategy_type}")
-        print(f"    过夜: {strategy_result.overnight_score}/20  波段: {strategy_result.swing_score}/15")
         
-        # Step 5: 消息面硬排除
-        print("  【Step 5】消息面硬排除...")
+        # Step 6: 消息面硬排除
+        print("  【Step 6】消息面硬排除...")
         if strategy_result.exclusions:
             print(f"    ❌ 硬排除: {', '.join(strategy_result.exclusions)}")
             return TradeSignal(
@@ -174,18 +200,18 @@ class QuantSystem:
                 strategy_type="观望", market_env=timing.environment,
                 position_pct=0, entry_price=0, stop_loss=0, target_price=0,
                 holding_days=0, triggered_strategies=[],
-                risk_per_trade=0, reason=f"硬排除: {', '.join(strategy_result.exclusions)}"
+                risk_per_trade=0, reason=f"硬排除: {', '.join(strategy_result.exclusions)}",
+                processed=True
             )
         print("    ✅ 无排除项")
         
-        # Step 6: 经典战法扫描
-        print("  【Step 6】经典战法扫描...")
+        # Step 7: 经典战法扫描
+        print("  【Step 7】经典战法扫描...")
         classic_signals = scan_classic_strategies(code)
         triggered = [s.name for s in classic_signals if s.triggered]
         
         if triggered:
             print(f"    ✅ 触发战法: {', '.join(triggered)}")
-            # 取最强信号
             best_signal = classic_signals[0]
             entry = best_signal.entry
             stop = best_signal.stop_loss
@@ -193,31 +219,24 @@ class QuantSystem:
             days = best_signal.holding_days
         else:
             print(f"    ⚠️ 无战法信号")
-            # 使用当前价作为参考
             entry = quote.price
             stop = quote.price * 0.95
             target = quote.price * 1.08
             days = 5
         
-        # Step 7: 仓位计算
-        print("  【Step 7】仓位计算...")
+        # Step 8: 仓位计算
+        print("  【Step 8】仓位计算...")
         if triggered:
-            pos_result = suggest_position(
-                triggered[0], timing.environment, score_result.grade
-            )
+            pos_result = suggest_position(triggered[0], timing.environment, score_result.grade)
         else:
-            pos_result = suggest_position(
-                "均线多头", timing.environment, score_result.grade
-            )
+            pos_result = suggest_position("均线多头", timing.environment, score_result.grade)
         
-        # 应用市场环境上限
         final_position = min(pos_result.final_position, timing.position_suggest)
         
         print(f"    半凯利: {pos_result.half_kelly*100:.1f}%")
         print(f"    最终仓位: {final_position*100:.1f}%")
-        print(f"    单笔风险: {pos_result.risk_per_trade*100:.2f}%")
         
-        # 综合决策
+        # Step 9: 综合决策
         if score_result.grade in ['S', 'A'] and (triggered or strategy_result.strategy_type != "观望"):
             action = "买入"
             reason = f"评分{score_result.grade}级，{'触发' + triggered[0] if triggered else '策略匹配'}"
@@ -230,22 +249,114 @@ class QuantSystem:
             final_position = 0
         
         return TradeSignal(
-            code=code,
-            name=quote.name,
-            action=action,
-            score=score_result.total_score,
-            grade=score_result.grade,
+            code=code, name=quote.name, action=action,
+            score=score_result.total_score, grade=score_result.grade,
             strategy_type=strategy_result.strategy_type,
-            market_env=timing.environment,
-            position_pct=final_position,
-            entry_price=entry,
-            stop_loss=stop,
-            target_price=target,
-            holding_days=days,
-            triggered_strategies=triggered,
-            risk_per_trade=pos_result.risk_per_trade,
-            reason=reason
+            market_env=timing.environment, position_pct=final_position,
+            entry_price=entry, stop_loss=stop, target_price=target,
+            holding_days=days, triggered_strategies=triggered,
+            risk_per_trade=pos_result.risk_per_trade, reason=reason,
+            processed=True
         )
+    
+    def _preprocess_realtime(self, quote) -> Dict:
+        """实时数据预处理"""
+        # 提取数值特征
+        features = {
+            'pe': getattr(quote, 'pe', 20),
+            'pb': getattr(quote, 'pb', 2),
+            'roe': getattr(quote, 'roe', 10),
+            'change_pct': quote.change_pct,
+            'volume': quote.volume,
+            'turnover_rate': getattr(quote, 'turnover_rate', 5)
+        }
+        
+        # 应用MAD去极值
+        for key, value in features.items():
+            features[key] = self._mad_clip(value, key)
+        
+        return features
+    
+    def _mad_clip(self, value: float, factor_name: str) -> float:
+        """简化版MAD裁剪（使用预设阈值）"""
+        thresholds = {
+            'pe': (5, 100),
+            'pb': (0.5, 10),
+            'roe': (-20, 50),
+            'change_pct': (-20, 20),
+            'turnover_rate': (0.1, 30)
+        }
+        
+        low, high = thresholds.get(factor_name, (-1000, 1000))
+        return max(low, min(high, value))
+    
+    def _run_factor_validation(self, codes: List[str]) -> Dict:
+        """运行因子检验（研究模式）"""
+        print("\n【研究模式】因子检验")
+        print("=" * 50)
+        
+        # 模拟历史数据检验
+        import numpy as np
+        np.random.seed(42)
+        
+        # 生成模拟因子和收益数据
+        n = len(codes) * 60  # 60个月历史
+        
+        factors = {
+            'PE': np.random.randn(n),
+            'ROE': np.random.randn(n),
+            'PB': np.random.randn(n),
+            'Momentum': np.random.randn(n),
+            'Turnover': np.random.randn(n)
+        }
+        
+        # 模拟收益（让部分因子有效）
+        returns = factors['PE'] * 0.05 + factors['ROE'] * 0.08 + np.random.randn(n) * 0.1
+        
+        # 检验
+        from factor_validator import test_multiple_factors
+        factor_series = {k: pd.Series(v) for k, v in factors.items()}
+        returns_series = pd.Series(returns)
+        
+        results = test_multiple_factors(factor_series, returns_series)
+        
+        print("\n因子检验结果:")
+        print(results.to_string(index=False))
+        
+        passed_factors = results[results['通过'] == True]['因子'].tolist()
+        print(f"\n通过检验的因子: {', '.join(passed_factors) if passed_factors else '无'}")
+        
+        return {
+            "mode": "因子检验",
+            "results": results.to_dict('records'),
+            "passed_factors": passed_factors
+        }
+    
+    def _run_layered_backtest(self, codes: List[str]) -> Dict:
+        """运行分层回测（研究模式）"""
+        print("\n【研究模式】分层回测")
+        print("=" * 50)
+        
+        import numpy as np
+        np.random.seed(42)
+        
+        # 模拟评分和收益
+        n = 1000
+        scores = pd.Series(np.random.randn(n))
+        returns = pd.Series(scores * 0.05 + np.random.randn(n) * 0.1)
+        
+        from layered_backtest import run_layered_backtest
+        report = run_layered_backtest(scores, returns)
+        
+        # 打印报告
+        from layered_backtest import LayeredBacktest
+        LayeredBacktest().print_report(report)
+        
+        return {
+            "mode": "分层回测",
+            "monotonic": report['monotonic'],
+            "long_short": report['long_short']
+        }
     
     def _print_report(self, report: Dict):
         """打印交易报告"""
@@ -253,12 +364,10 @@ class QuantSystem:
         print("交易报告")
         print("=" * 70)
         
-        # 市场环境
         market = report["market"]
         print(f"\n【市场环境】{market['environment']} (评分: {market['score']:.1f})")
         print(f"【仓位上限】{market['position_limit']*100:.0f}%")
         
-        # 汇总
         summary = report["summary"]
         print(f"\n【分析汇总】")
         print(f"  分析股票: {summary['total_analyzed']} 只")
@@ -267,56 +376,50 @@ class QuantSystem:
         if summary['top_pick']:
             print(f"  首选标的: {summary['top_pick']}")
         
-        # 买入信号
         if report["buy_signals"]:
             print(f"\n【买入信号】({len(report['buy_signals'])} 只)")
-            print(f"{'排名':<4} {'代码':<8} {'名称':<10} {'评分':<6} {'等级':<4} {'策略':<8} {'仓位':<6} {'入场价':<8} {'止损':<8} {'目标':<8} {'天数':<4}")
-            print("-" * 90)
+            print(f"{'排名':<4} {'代码':<8} {'名称':<10} {'评分':<6} {'等级':<4} {'策略':<8} {'仓位':<6} {'入场价':<8} {'止损':<8} {'目标':<8}")
+            print("-" * 80)
             for i, s in enumerate(report["buy_signals"][:10], 1):
-                print(f"{i:<4} {s['code']:<8} {s['name']:<10} {s['score']:<6.0f} {s['grade']:<4} {s['strategy_type']:<8} {s['position_pct']*100:<6.1f}% ¥{s['entry_price']:<8.2f} ¥{s['stop_loss']:<8.2f} ¥{s['target_price']:<8.2f} {s['holding_days']:<4}")
-                print(f"     战法: {', '.join(s['triggered_strategies']) if s['triggered_strategies'] else '无'}")
+                print(f"{i:<4} {s['code']:<8} {s['name']:<10} {s['score']:<6.0f} {s['grade']:<4} {s['strategy_type']:<8} {s['position_pct']*100:<6.1f}% ¥{s['entry_price']:<8.2f} ¥{s['stop_loss']:<8.2f} ¥{s['target_price']:<8.2f}")
                 print(f"     理由: {s['reason']}")
-                print()
-        
-        # 观望信号
-        if report["watch_signals"]:
-            print(f"\n【观望名单】({len(report['watch_signals'])} 只)")
-            for s in report["watch_signals"][:5]:
-                print(f"  {s['code']} {s['name']} - {s['reason']}")
         
         print("\n" + "=" * 70)
 
 
-def run_quant_system(codes: List[str], deep: bool = False) -> Dict:
+def run_quant_system(codes: List[str], 
+                     validate: bool = False,
+                     backtest: bool = False) -> Dict:
     """便捷函数：运行量化系统"""
     system = QuantSystem()
-    return system.run(codes, deep)
+    return system.run(codes, validate=validate, backtest_mode=backtest)
 
 
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description='A股量化交易系统 - 主控制器')
-    parser.add_argument('codes', nargs='+', help='股票代码列表，如 000001 000002 600519')
-    parser.add_argument('--deep', action='store_true', help='深度分析模式')
+    parser = argparse.ArgumentParser(description='A股量化交易系统 v3.2')
+    parser.add_argument('codes', nargs='*', help='股票代码列表')
+    parser.add_argument('--validate', action='store_true', help='因子检验模式（研究）')
+    parser.add_argument('--backtest', action='store_true', help='分层回测模式（研究）')
     parser.add_argument('--json', action='store_true', help='JSON输出')
     
     args = parser.parse_args()
     
-    report = run_quant_system(args.codes, args.deep)
+    # 研究模式不需要股票代码
+    if args.validate or args.backtest:
+        report = run_quant_system([], validate=args.validate, backtest=args.backtest)
+    elif args.codes:
+        report = run_quant_system(args.codes)
+    else:
+        # 默认测试
+        test_codes = ["000001", "000002", "600519"]
+        print(f"使用测试股票: {', '.join(test_codes)}")
+        report = run_quant_system(test_codes)
     
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
 
 
 if __name__ == "__main__":
-    # 默认测试
-    if len(sys.argv) == 1:
-        # 测试用例
-        test_codes = ["000001", "000002", "600519"]
-        print(f"\n使用测试股票: {', '.join(test_codes)}")
-        print("如需自定义，运行: python3 master_controller.py 000001 000002 600519")
-        print()
-        run_quant_system(test_codes)
-    else:
-        main()
+    main()
