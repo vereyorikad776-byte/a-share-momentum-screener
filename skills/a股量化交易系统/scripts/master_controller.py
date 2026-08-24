@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 
 # 导入各模块
-from data_gateway import get_quote, get_kline
+from data_gateway import get_quote, get_kline, get_batch_quotes, get_financial_data
 from five_dimension_timing import get_market_timing
 from scoring_engine_v3_1 import score_stock
 from strategy_classifier import classify_strategy
@@ -92,10 +92,17 @@ class QuantSystem:
         if backtest_mode:
             return self._run_layered_backtest(codes)
         
-        # 实盘模式: 逐只分析
+        # 实盘模式: 分批获取行情（防限流）
+        print(f"\n【批量分析】{len(codes)} 只股票，分批获取...")
+        batch_quotes = get_batch_quotes(codes, batch_size=3, interval=1.5)
+        print(f"  成功获取 {len(batch_quotes)}/{len(codes)} 只行情")
+        
         signals = []
         for code in codes:
-            signal = self._analyze_single(code, timing)
+            if code not in batch_quotes:
+                print(f"  {code}: 行情获取失败，跳过")
+                continue
+            signal = self._analyze_single(code, timing, batch_quotes[code])
             if signal:
                 signals.append(signal)
         
@@ -149,19 +156,20 @@ class QuantSystem:
         
         return timing
     
-    def _analyze_single(self, code: str, timing) -> Optional[TradeSignal]:
+    def _analyze_single(self, code: str, timing, quote) -> Optional[TradeSignal]:
         """分析单只股票（Step 2-9）"""
         print(f"\n{'='*50}")
         print(f"分析: {code}")
         print(f"{'='*50}")
         
-        # Step 2: 获取行情
-        quote = get_quote(code)
+        # Step 2: 行情已在批量获取时拿到
         if not quote:
             print(f"  ❌ 无法获取行情，跳过")
             return None
         
         print(f"  {quote.name} 当前价: ¥{quote.price} ({quote.change_pct:+.2f}%)")
+        if quote.sources:
+            print(f"  数据来源: {', '.join(quote.sources)}")
         
         # Step 3: 数据预处理（新增）
         print("  【Step 3】数据预处理...")
