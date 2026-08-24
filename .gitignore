@@ -1,0 +1,24 @@
+# OpenClaw 配置文件
+.openclaw/
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+
+# 下载文件
+downloads/
+
+# 日志
+*.log
+
+# 环境变量
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
