@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+A股量化交易系统 - 主控制器
+整合所有模块，一键执行完整交易流水线
+"""
+
+import sys
+import json
+import time
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, asdict
+
+# 导入各模块
+from data_gateway import get_quote, get_kline
+from five_dimension_timing import get_market_timing
+from scoring_engine_v3_1 import score_stock
+from strategy_classifier import classify_strategy
+from classic_strategies import scan_classic_strategies
+from position_sizing_v3 import suggest_position
+
+
+@dataclass
+class TradeSignal:
+    """最终交易信号"""
+    code: str
+    name: str
+    action: str              # 买入/观望/卖出
+    score: float             # 综合评分
+    grade: str               # S/A/B/C/D
+    strategy_type: str       # 过夜/波段/观望
+    market_env: str          # 市场环境
+    position_pct: float      # 建议仓位
+    entry_price: float       # 入场价
+    stop_loss: float         # 止损价
+    target_price: float      # 目标价
+    holding_days: int        # 持仓天数
+    triggered_strategies: List[str]  # 触发的战法
+    risk_per_trade: float    # 单笔风险
+    reason: str              # 决策理由
+
+
+class QuantSystem:
+    """A股量化交易系统主控制器"""
+    
+    def __init__(self):
+        self.market_env = None
+        self.market_score = None
+        self.position_limit = None
+    
+    def run(self, codes: List[str], deep: bool = False) -> Dict:
+        """
+        执行完整交易流水线
+        
+        Args:
+            codes: 股票代码列表，如 ["000001", "000002", "600519"]
+            deep: 是否输出深度分析
+            
+        Returns:
+            完整交易报告
+        """
+        print("=" * 70)
+        print("A股量化交易系统 v3.1 - 完整交易流水线")
+        print(f"执行时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 70)
+        
+        # Step 1: 市场择时
+        timing = self._step1_market_timing()
+        if not timing:
+            return {"error": "市场择时失败"}
+        
+        # Step 2-7: 逐只分析
+        signals = []
+        for code in codes:
+            signal = self._analyze_single(code, timing)
+            if signal:
+                signals.append(signal)
+        
+        # Step 8: 排序和筛选
+        buy_signals = [s for s in signals if s.action == "买入"]
+        watch_signals = [s for s in signals if s.action == "观望"]
+        
+        buy_signals.sort(key=lambda x: x.score, reverse=True)
+        
+        # Step 9: 生成报告
+        report = {
+            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+            "market": {
+                "environment": timing.environment,
+                "score": timing.score,
+                "position_limit": timing.position_suggest
+            },
+            "summary": {
+                "total_analyzed": len(codes),
+                "buy_signals": len(buy_signals),
+                "watch_signals": len(watch_signals),
+                "top_pick": buy_signals[0].code if buy_signals else None
+            },
+            "buy_signals": [asdict(s) for s in buy_signals],
+            "watch_signals": [asdict(s) for s in watch_signals],
+            "deep_analysis": deep
+        }
+        
+        self._print_report(report)
+        return report
+    
+    def _step1_market_timing(self) -> Optional[object]:
+        """Step 1: 市场择时"""
+        print("\n【Step 1/9】市场环境判断...")
+        
+        timing = get_market_timing()
+        self.market_env = timing.environment
+        self.market_score = timing.score
+        self.position_limit = timing.position_suggest
+        
+        print(f"  市场环境: {timing.environment}")
+        print(f"  综合评分: {timing.score:.1f}")
+        print(f"  仓位上限: {timing.position_suggest*100:.0f}%")
+        
+        # 环境决策
+        if timing.score < 40:
+            print("  ⚠️ 市场环境恶劣，建议空仓观望")
+        elif timing.score < 60:
+            print("  ⚡ 震荡市，降低仓位，精选个股")
+        else:
+            print("  🚀 市场环境良好，积极操作")
+        
+        return timing
+    
+    def _analyze_single(self, code: str, timing) -> Optional[TradeSignal]:
+        """分析单只股票（Step 2-7）"""
+        print(f"\n{'='*50}")
+        print(f"分析: {code}")
+        print(f"{'='*50}")
+        
+        # Step 2: 获取行情
+        quote = get_quote(code)
+        if not quote:
+            print(f"  ❌ 无法获取行情，跳过")
+            return None
+        
+        print(f"  {quote.name} 当前价: ¥{quote.price} ({quote.change_pct:+.2f}%)")
+        
+        # Step 3: 四层框架评分
+        print("  【Step 3】四层框架评分...")
+        score_result = score_stock(code, timing.environment)
+        print(f"    总分: {score_result.total_score:.0f}  等级: {score_result.grade}")
+        
+        # 评分过滤
+        if score_result.total_score < 55:
+            print(f"    ❌ 评分不足(<55)，淘汰")
+            return TradeSignal(
+                code=code, name=quote.name, action="观望",
+                score=score_result.total_score, grade=score_result.grade,
+                strategy_type="观望", market_env=timing.environment,
+                position_pct=0, entry_price=0, stop_loss=0, target_price=0,
+                holding_days=0, triggered_strategies=[],
+                risk_per_trade=0, reason="评分不足(<55)"
+            )
+        
+        # Step 4: 策略类型判定
+        print("  【Step 4】策略类型判定...")
+        strategy_result = classify_strategy(code, timing.environment)
+        print(f"    类型: {strategy_result.strategy_type}")
+        print(f"    过夜: {strategy_result.overnight_score}/20  波段: {strategy_result.swing_score}/15")
+        
+        # Step 5: 消息面硬排除
+        print("  【Step 5】消息面硬排除...")
+        if strategy_result.exclusions:
+            print(f"    ❌ 硬排除: {', '.join(strategy_result.exclusions)}")
+            return TradeSignal(
+                code=code, name=quote.name, action="观望",
+                score=score_result.total_score, grade=score_result.grade,
+                strategy_type="观望", market_env=timing.environment,
+                position_pct=0, entry_price=0, stop_loss=0, target_price=0,
+                holding_days=0, triggered_strategies=[],
+                risk_per_trade=0, reason=f"硬排除: {', '.join(strategy_result.exclusions)}"
+            )
+        print("    ✅ 无排除项")
+        
+        # Step 6: 经典战法扫描
+        print("  【Step 6】经典战法扫描...")
+        classic_signals = scan_classic_strategies(code)
+        triggered = [s.name for s in classic_signals if s.triggered]
+        
+        if triggered:
+            print(f"    ✅ 触发战法: {', '.join(triggered)}")
+            # 取最强信号
+            best_signal = classic_signals[0]
+            entry = best_signal.entry
+            stop = best_signal.stop_loss
+            target = best_signal.target
+            days = best_signal.holding_days
+        else:
+            print(f"    ⚠️ 无战法信号")
+            # 使用当前价作为参考
+            entry = quote.price
+            stop = quote.price * 0.95
+            target = quote.price * 1.08
+            days = 5
+        
+        # Step 7: 仓位计算
+        print("  【Step 7】仓位计算...")
+        if triggered:
+            pos_result = suggest_position(
+                triggered[0], timing.environment, score_result.grade
+            )
+        else:
+            pos_result = suggest_position(
+                "均线多头", timing.environment, score_result.grade
+            )
+        
+        # 应用市场环境上限
+        final_position = min(pos_result.final_position, timing.position_suggest)
+        
+        print(f"    半凯利: {pos_result.half_kelly*100:.1f}%")
+        print(f"    最终仓位: {final_position*100:.1f}%")
+        print(f"    单笔风险: {pos_result.risk_per_trade*100:.2f}%")
+        
+        # 综合决策
+        if score_result.grade in ['S', 'A'] and (triggered or strategy_result.strategy_type != "观望"):
+            action = "买入"
+            reason = f"评分{score_result.grade}级，{'触发' + triggered[0] if triggered else '策略匹配'}"
+        elif score_result.grade == 'B' and triggered:
+            action = "买入"
+            reason = f"评分B级，触发战法，谨慎参与"
+        else:
+            action = "观望"
+            reason = f"评分{score_result.grade}级，无明确信号"
+            final_position = 0
+        
+        return TradeSignal(
+            code=code,
+            name=quote.name,
+            action=action,
+            score=score_result.total_score,
+            grade=score_result.grade,
+            strategy_type=strategy_result.strategy_type,
+            market_env=timing.environment,
+            position_pct=final_position,
+            entry_price=entry,
+            stop_loss=stop,
+            target_price=target,
+            holding_days=days,
+            triggered_strategies=triggered,
+            risk_per_trade=pos_result.risk_per_trade,
+            reason=reason
+        )
+    
+    def _print_report(self, report: Dict):
+        """打印交易报告"""
+        print("\n" + "=" * 70)
+        print("交易报告")
+        print("=" * 70)
+        
+        # 市场环境
+        market = report["market"]
+        print(f"\n【市场环境】{market['environment']} (评分: {market['score']:.1f})")
+        print(f"【仓位上限】{market['position_limit']*100:.0f}%")
+        
+        # 汇总
+        summary = report["summary"]
+        print(f"\n【分析汇总】")
+        print(f"  分析股票: {summary['total_analyzed']} 只")
+        print(f"  买入信号: {summary['buy_signals']} 只")
+        print(f"  观望信号: {summary['watch_signals']} 只")
+        if summary['top_pick']:
+            print(f"  首选标的: {summary['top_pick']}")
+        
+        # 买入信号
+        if report["buy_signals"]:
+            print(f"\n【买入信号】({len(report['buy_signals'])} 只)")
+            print(f"{'排名':<4} {'代码':<8} {'名称':<10} {'评分':<6} {'等级':<4} {'策略':<8} {'仓位':<6} {'入场价':<8} {'止损':<8} {'目标':<8} {'天数':<4}")
+            print("-" * 90)
+            for i, s in enumerate(report["buy_signals"][:10], 1):
+                print(f"{i:<4} {s['code']:<8} {s['name']:<10} {s['score']:<6.0f} {s['grade']:<4} {s['strategy_type']:<8} {s['position_pct']*100:<6.1f}% ¥{s['entry_price']:<8.2f} ¥{s['stop_loss']:<8.2f} ¥{s['target_price']:<8.2f} {s['holding_days']:<4}")
+                print(f"     战法: {', '.join(s['triggered_strategies']) if s['triggered_strategies'] else '无'}")
+                print(f"     理由: {s['reason']}")
+                print()
+        
+        # 观望信号
+        if report["watch_signals"]:
+            print(f"\n【观望名单】({len(report['watch_signals'])} 只)")
+            for s in report["watch_signals"][:5]:
+                print(f"  {s['code']} {s['name']} - {s['reason']}")
+        
+        print("\n" + "=" * 70)
+
+
+def run_quant_system(codes: List[str], deep: bool = False) -> Dict:
+    """便捷函数：运行量化系统"""
+    system = QuantSystem()
+    return system.run(codes, deep)
+
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='A股量化交易系统 - 主控制器')
+    parser.add_argument('codes', nargs='+', help='股票代码列表，如 000001 000002 600519')
+    parser.add_argument('--deep', action='store_true', help='深度分析模式')
+    parser.add_argument('--json', action='store_true', help='JSON输出')
+    
+    args = parser.parse_args()
+    
+    report = run_quant_system(args.codes, args.deep)
+    
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+
+
+if __name__ == "__main__":
+    # 默认测试
+    if len(sys.argv) == 1:
+        # 测试用例
+        test_codes = ["000001", "000002", "600519"]
+        print(f"\n使用测试股票: {', '.join(test_codes)}")
+        print("如需自定义，运行: python3 master_controller.py 000001 000002 600519")
+        print()
+        run_quant_system(test_codes)
+    else:
+        main()
