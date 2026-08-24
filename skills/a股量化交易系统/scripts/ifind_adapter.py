@@ -1,299 +1,346 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-iFinD 数据源适配器
-支持两种模式：
-1. 本地iFinD终端模式（Windows本地终端提供API服务）
-2. HTTP API模式（直接调用iFinD云端接口）
-
-使用前需配置：~/.openclaw/.env 或环境变量
+iFinD 数据源适配器 v2.0
+通过 MCP 协议调用 iFinD 数据服务
 """
 
 import os
+import sys
 import json
-import requests
+import time
 from typing import Dict, List, Optional
 from dataclasses import dataclass
+
+# 尝试导入 MCP call 模块
+# MCP skill 在 workspace/skills/ifind-finance-data 中
+_WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+IFIND_SKILL_DIR = os.path.join(_WORKSPACE, 'skills', 'ifind-finance-data')
+sys.path.insert(0, IFIND_SKILL_DIR)
+
+try:
+    import call as ifind_call
+    MCP_AVAILABLE = True
+except Exception as e:
+    print(f"  [debug] MCP import failed: {e}")
+    MCP_AVAILABLE = False
 
 
 @dataclass
 class iFinDConfig:
     """iFinD配置"""
-    mode: str           # 'terminal' | 'http' | 'mock'
-    username: str
-    password: str
-    host: str = "127.0.0.1"
-    port: int = 10080   # iFinD终端默认端口
-    token: str = ""     # HTTP API模式用的token
+    mode: str = 'mcp'  # 'mcp' | 'mock'
 
 
 class iFinDAdapter:
-    """
-    iFinD数据适配器
-    
-    由于iFinD终端是Windows软件，Linux服务器无法直接安装。
-    提供三种接入方案：
-    """
+    """iFinD数据适配器 v2.0 - MCP模式"""
     
     def __init__(self, config: Optional[iFinDConfig] = None):
-        self.config = config or self._load_config()
-        self.mock_mode = self.config.mode == 'mock'
-        self._token = None
+        self.config = config or iFinDConfig()
+        self.mock_mode = self.config.mode == 'mock' or not MCP_AVAILABLE
+        self._cache = {}
+        self._cache_ttl = 300  # 5分钟缓存
         
-    def _load_config(self) -> iFinDConfig:
-        """从环境变量或配置文件加载"""
-        # 优先环境变量
-        mode = os.getenv('IFIND_MODE', 'mock')
-        username = os.getenv('IFIND_USER', '')
-        password = os.getenv('IFIND_PASS', '')
-        host = os.getenv('IFIND_HOST', '127.0.0.1')
-        port = int(os.getenv('IFIND_PORT', '10080'))
-        token = os.getenv('IFIND_TOKEN', '')
-        
-        # 其次配置文件
-        env_file = os.path.expanduser('~/.openclaw/.env')
-        if os.path.exists(env_file):
-            with open(env_file) as f:
-                for line in f:
-                    if '=' in line and not line.startswith('#'):
-                        key, val = line.strip().split('=', 1)
-                        if key == 'IFIND_MODE':
-                            mode = val
-                        elif key == 'IFIND_USER':
-                            username = val
-                        elif key == 'IFIND_PASS':
-                            password = val
-                        elif key == 'IFIND_HOST':
-                            host = val
-                        elif key == 'IFIND_PORT':
-                            port = int(val)
-                        elif key == 'IFIND_TOKEN':
-                            token = val
-        
-        return iFinDConfig(mode=mode, username=username, password=password,
-                          host=host, port=port, token=token)
-    
     def is_available(self) -> bool:
         """检查iFinD是否可用"""
         if self.mock_mode:
             return True
+        return MCP_AVAILABLE
+    
+    def _cache_get(self, key: str):
+        """获取缓存"""
+        if key in self._cache:
+            data, ts = self._cache[key]
+            if time.time() - ts < self._cache_ttl:
+                return data
+        return None
+    
+    def _cache_set(self, key: str, data):
+        """设置缓存"""
+        self._cache[key] = (data, time.time())
+    
+    def _call_mcp(self, server_type: str, tool_name: str, params: dict) -> Optional[dict]:
+        """调用iFinD MCP工具"""
+        if not MCP_AVAILABLE:
+            return None
         
         try:
-            if self.config.mode == 'terminal':
-                # 检查iFinD终端API服务是否可达
-                resp = requests.get(f"http://{self.config.host}:{self.config.port}/api/v1/status",
-                                   timeout=3)
-                return resp.status_code == 200
-            elif self.config.mode == 'http':
-                # 检查HTTP API
-                return bool(self.config.token)
-        except Exception:
-            pass
+            result = ifind_call.call(server_type, tool_name, params)
+            if result.get('ok'):
+                return result.get('data', {})
+            else:
+                print(f"  iFinD MCP调用失败: {result.get('error')}")
+                return None
+        except Exception as e:
+            print(f"  iFinD MCP异常: {e}")
+            return None
+    
+    def _extract_content(self, mcp_response: dict) -> str:
+        """从MCP响应中提取文本内容"""
+        if not mcp_response:
+            return ""
         
-        return False
+        result = mcp_response.get('result', {})
+        content = result.get('content', [])
+        
+        for item in content:
+            if item.get('type') == 'text':
+                return item.get('text', '')
+        
+        return str(result)
     
     def get_financial_data(self, code: str) -> Dict:
         """
         获取详细财务数据
-        
-        返回：
-        - ROE / ROA / 毛利率 / 净利率
-        - 营收增长 / 净利润增长
-        - 现金流 / 自由现金流
-        - 资产负债率 / 有息负债
+        ROE / ROA / 毛利率 / 净利率 / 营收增长 / 现金流 / 资产负债率
         """
-        if self.mock_mode:
-            return self._mock_financial(code)
+        cache_key = f"fin_{code}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
         
-        # 实际iFinD调用
-        return self._call_ifind('financial', {'code': code})
+        if self.mock_mode:
+            data = self._mock_financial(code)
+            self._cache_set(cache_key, data)
+            return data
+        
+        # 通过MCP获取
+        name = self._get_stock_name(code)
+        query = f"{name}({code})最近一期的ROE、ROA、毛利率、净利率、营收同比增长率、净利润增长率、经营活动现金流、资产负债率"
+        
+        resp = self._call_mcp('stock', 'get_stock_financials', {'query': query})
+        text = self._extract_content(resp)
+        
+        # 解析返回的文本（简化解析）
+        data = self._parse_financial_text(text, code)
+        data['raw'] = text
+        
+        self._cache_set(cache_key, data)
+        return data
     
-    def get_institution_holdings(self, code: str) -> Dict:
-        """
-        获取机构持仓数据
+    def get_stock_summary(self, code: str) -> Dict:
+        """获取股票信息摘要"""
+        cache_key = f"sum_{code}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
         
-        返回：
-        - 基金持仓比例
-        - 机构数量变化
-        - 北向资金持股
-        - 龙虎榜数据
-        """
         if self.mock_mode:
-            return self._mock_institution(code)
+            return self._mock_summary(code)
         
-        return self._call_ifind('institution', {'code': code})
+        name = self._get_stock_name(code)
+        query = f"{name}({code})最新估值水平、近期行情走势、最新财务指标"
+        
+        resp = self._call_mcp('stock', 'get_stock_summary', {'query': query})
+        text = self._extract_content(resp)
+        
+        data = {'code': code, 'raw': text}
+        self._cache_set(cache_key, data)
+        return data
     
-    def get_north_flow(self, code: str, days: int = 30) -> List[Dict]:
-        """
-        获取北向资金流向
+    def get_stock_performance(self, code: str, days: int = 20) -> Dict:
+        """获取历史行情和技术指标"""
+        cache_key = f"perf_{code}_{days}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
         
-        返回每日北向资金流入/流出明细
-        """
         if self.mock_mode:
-            return self._mock_north_flow(code, days)
+            return self._mock_performance(code)
         
-        return self._call_ifind('north_flow', {'code': code, 'days': days})
+        name = self._get_stock_name(code)
+        end = time.strftime('%Y%m%d')
+        start = time.strftime('%Y%m%d', time.localtime(time.time() - days*86400))
+        query = f"{name}({code}){start}-{end}的涨跌幅、换手率、MACD、KDJ、RSI"
+        
+        resp = self._call_mcp('stock', 'get_stock_performance', {'query': query})
+        text = self._extract_content(resp)
+        
+        data = {'code': code, 'raw': text}
+        self._cache_set(cache_key, data)
+        return data
     
-    def get_sector_data(self, sector: str) -> Dict:
-        """
-        获取行业数据
+    def get_risk_indicators(self, code: str) -> Dict:
+        """获取风险指标（beta、波动率、夏普比率）"""
+        cache_key = f"risk_{code}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
         
-        返回：
-        - 行业规模及增速
-        - 竞争格局
-        - 政策环境
-        """
         if self.mock_mode:
-            return self._mock_sector(sector)
+            return self._mock_risk(code)
         
-        return self._call_ifind('sector', {'sector': sector})
+        name = self._get_stock_name(code)
+        query = f"{name}({code})过去1年的beta、年化波动率、夏普比率（以沪深300作为市场基准）"
+        
+        resp = self._call_mcp('stock', 'get_risk_indicators', {'query': query})
+        text = self._extract_content(resp)
+        
+        data = {'code': code, 'raw': text}
+        self._cache_set(cache_key, data)
+        return data
     
-    def get_quote(self, code: str) -> Optional[Dict]:
-        """
-        获取实时行情（iFinD增强版）
-        返回比腾讯更完整的字段
-        """
-        if self.mock_mode:
-            return None  # 让网关 fallback 到腾讯
+    def get_shareholders(self, code: str) -> Dict:
+        """获取股东结构数据"""
+        cache_key = f"holder_{code}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
         
+        if self.mock_mode:
+            return self._mock_shareholders(code)
+        
+        name = self._get_stock_name(code)
+        query = f"{name}({code})流通股占比、前5大股东持股占比、机构持股信息"
+        
+        resp = self._call_mcp('stock', 'get_stock_shareholders', {'query': query})
+        text = self._extract_content(resp)
+        
+        data = {'code': code, 'raw': text}
+        self._cache_set(cache_key, data)
+        return data
+    
+    def search_stocks(self, query: str) -> List[Dict]:
+        """智能选股"""
+        if self.mock_mode:
+            return []
+        
+        resp = self._call_mcp('stock', 'search_stocks', {'query': query})
+        text = self._extract_content(resp)
+        
+        # 尝试解析股票列表
+        stocks = []
+        # 简单解析：找股票代码格式
+        import re
+        codes = re.findall(r'(\d{6})', text)
+        for c in set(codes):
+            stocks.append({'code': c, 'source': 'ifind_search'})
+        
+        return stocks
+    
+    def _get_stock_name(self, code: str) -> str:
+        """获取股票名称（简单映射，实际可查询）"""
+        name_map = {
+            '000001': '平安银行', '000002': '万科A', '000983': '山西焦煤',
+            '600000': '浦发银行', '600519': '贵州茅台', '601318': '中国平安',
+            '000858': '五粮液', '002594': '比亚迪', '300750': '宁德时代'
+        }
+        return name_map.get(code, code)
+    
+    def _parse_financial_text(self, text: str, code: str) -> Dict:
+        """从财务文本中解析关键指标"""
+        import re
+        
+        data = {'code': code, 'source': 'ifind_mcp'}
+        
+        # 尝试从JSON解析
         try:
-            data = self._call_ifind('quote', {'code': code})
-            if data and 'price' in data:
-                return data
+            json_data = json.loads(text)
+            inner = json_data.get('data', '{}')
+            if isinstance(inner, str):
+                inner = json.loads(inner)
+            answer = inner.get('answer', '')
+            
+            # JSON转义后 \\n 是文字而非换行符，需先替换
+            answer = answer.replace('\\n', '\n').replace('\\t', '\t')
+            lines = [l.strip() for l in answer.strip().split('\n') if l.strip()]
+            
+            if len(lines) >= 3:
+                # 严格按位置对应（保留空值）
+                header_parts = lines[0].split('|')
+                data_parts = lines[-1].split('|')  # 数据行是最后一行
+                
+                for i in range(len(header_parts)):
+                    h = header_parts[i].strip()
+                    if not h or h.startswith('---') or h == '证券代码' or h == '证券简称':
+                        continue
+                    if i < len(data_parts):
+                        val_str = data_parts[i].strip()
+                        if not val_str:
+                            continue  # 空值跳过
+                        
+                        # ROE
+                        if '净资产收益率ROE' in h or h == 'ROE':
+                            try: data['roe'] = float(val_str)
+                            except: pass
+                        # ROA
+                        elif '总资产净利率ROA' in h or h == 'ROA':
+                            try: data['roa'] = float(val_str)
+                            except: pass
+                        # 毛利率
+                        elif '毛利率' in h and '净利率' not in h:
+                            try: data['gross_margin'] = float(val_str)
+                            except: pass
+                        # 净利率
+                        elif '净利率' in h and '毛利率' not in h:
+                            try: data['net_margin'] = float(val_str)
+                            except: pass
+                        # 资产负债率
+                        elif '资产负债率' in h:
+                            try: data['debt_ratio'] = float(val_str)
+                            except: pass
+                        # 营收增长
+                        elif ('营业收入' in h or '营业总收入' in h) and '增长' in h:
+                            try: data['revenue_growth'] = float(val_str)
+                            except: pass
+                        # 净利润增长
+                        elif '净利润' in h and '增长' in h and '归属' not in h:
+                            try: data['profit_growth'] = float(val_str)
+                            except: pass
+                        # 归属母公司净利润增长
+                        elif '归属母公司' in h and '增长' in h:
+                            try:
+                                if data.get('profit_growth') is None:
+                                    data['profit_growth'] = float(val_str)
+                            except: pass
+                        # 现金流量
+                        elif '现金流量' in h or '现金流' in h:
+                            try:
+                                val_clean = val_str.replace('亿', 'e8').replace('万', 'e4').replace(',', '')
+                                data['operating_cashflow'] = float(val_clean)
+                            except: pass
+                        
         except Exception as e:
-            print(f"iFinD行情获取失败: {e}")
+            # Fallback: 正则匹配
+            patterns = {
+                'roe': r'净资产收益率ROE.*?([\d.]+)',
+                'roa': r'总资产净利率ROA.*?([\d.]+)',
+                'gross_margin': r'毛利率.*?([\d.]+)',
+                'net_margin': r'净利率.*?([\d.]+)',
+                'revenue_growth': r'营收.*增长.*?([\d.]+)',
+                'profit_growth': r'净利润.*增长.*?([\d.]+)',
+                'debt_ratio': r'资产负债率.*?([\d.]+)',
+            }
+            for key, pattern in patterns.items():
+                match = re.search(pattern, text)
+                if match:
+                    try:
+                        data[key] = float(match.group(1))
+                    except:
+                        pass
         
-        return None
+        return data
     
-    def get_kline_ifind(self, code: str, period: str = "day", count: int = 60) -> List[Dict]:
-        """
-        获取K线数据（iFinD版，数据更全）
-        """
-        if self.mock_mode:
-            return []
-        
-        try:
-            return self._call_ifind('kline', {
-                'code': code,
-                'period': period,
-                'count': count
-            })
-        except Exception as e:
-            print(f"iFinD K线获取失败: {e}")
-            return []
-    
-    def get_sector_ranking(self, sector: str, metric: str = "roe") -> List[Dict]:
-        """
-        获取行业内股票排名
-        """
-        if self.mock_mode:
-            return []
-        
-        try:
-            return self._call_ifind('sector_ranking', {
-                'sector': sector,
-                'metric': metric
-            })
-        except Exception as e:
-            print(f"iFinD行业排名获取失败: {e}")
-            return []
-    
-    def get_estimates(self, code: str) -> Dict:
-        """
-        获取机构一致预期
-        """
-        if self.mock_mode:
-            return {}
-        
-        try:
-            return self._call_ifind('estimates', {'code': code})
-        except Exception as e:
-            print(f"iFinD一致预期获取失败: {e}")
-            return {}
-    
-    def get_announcements(self, code: str, days: int = 30) -> List[Dict]:
-        """
-        获取公司公告
-        """
-        if self.mock_mode:
-            return []
-        
-        try:
-            return self._call_ifind('announcements', {
-                'code': code,
-                'days': days
-            })
-        except Exception as e:
-            print(f"iFinD公告获取失败: {e}")
-            return []
-    
-    def _call_ifind(self, endpoint: str, params: Dict):
-        """调用iFinD API"""
-        if self.config.mode == 'terminal':
-            url = f"http://{self.config.host}:{self.config.port}/api/v1/{endpoint}"
-            resp = requests.post(url, json=params, timeout=30)
-            return resp.json()
-        elif self.config.mode == 'http':
-            # iFinD HTTP API调用
-            headers = {'Authorization': f'Bearer {self.config.token}'}
-            url = f"https://api.ifind.com/v1/{endpoint}"
-            resp = requests.post(url, json=params, headers=headers, timeout=30)
-            return resp.json()
-        else:
-            raise RuntimeError(f"Unknown mode: {self.config.mode}")
-    
-    # Mock 数据（用于测试/未配置时）
+    # Mock 数据（降级用）
     def _mock_financial(self, code: str) -> Dict:
         return {
-            'code': code,
-            'roe': 12.5,
-            'roa': 8.3,
-            'gross_margin': 35.2,
-            'net_margin': 15.8,
-            'revenue_growth': 22.1,
-            'profit_growth': 18.5,
-            'operating_cashflow': 1250000000,
-            'free_cashflow': 850000000,
-            'debt_ratio': 42.3,
-            'interest_debt': 3200000000,
-            'source': 'mock'
+            'code': code, 'source': 'mock',
+            'roe': 12.5, 'roa': 8.3, 'gross_margin': 35.2,
+            'net_margin': 15.8, 'revenue_growth': 22.1,
+            'profit_growth': 18.5, 'debt_ratio': 42.3
         }
     
-    def _mock_institution(self, code: str) -> Dict:
-        return {
-            'code': code,
-            'fund_holding_pct': 8.5,
-            'institution_count': 45,
-            'institution_change': +3,
-            'north_holding_pct': 2.1,
-            'source': 'mock'
-        }
+    def _mock_summary(self, code: str) -> Dict:
+        return {'code': code, 'source': 'mock', 'raw': 'mock summary'}
     
-    def _mock_north_flow(self, code: str, days: int) -> List[Dict]:
-        import random
-        from datetime import datetime, timedelta
-        
-        results = []
-        for i in range(days):
-            date = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
-            results.append({
-                'date': date,
-                'inflow': round(random.uniform(-5000, 8000), 2),
-                'outflow': round(random.uniform(0, 5000), 2),
-                'net': round(random.uniform(-3000, 5000), 2),
-                'source': 'mock'
-            })
-        return results
+    def _mock_performance(self, code: str) -> Dict:
+        return {'code': code, 'source': 'mock', 'raw': 'mock performance'}
     
-    def _mock_sector(self, sector: str) -> Dict:
-        return {
-            'sector': sector,
-            'size': 5000,
-            'growth': 15.2,
-            'cr5': 35.0,
-            'policy': 'support',
-            'source': 'mock'
-        }
+    def _mock_risk(self, code: str) -> Dict:
+        return {'code': code, 'source': 'mock', 'beta': 1.0, 'volatility': 0.25}
+    
+    def _mock_shareholders(self, code: str) -> Dict:
+        return {'code': code, 'source': 'mock', 'fund_pct': 5.0}
 
 
 # 便捷函数
@@ -305,35 +352,24 @@ def get_ifind_adapter() -> iFinDAdapter:
         _adapter = iFinDAdapter()
     return _adapter
 
-
 def is_ifind_available() -> bool:
     return get_ifind_adapter().is_available()
-
 
 def get_financial_data(code: str) -> Dict:
     return get_ifind_adapter().get_financial_data(code)
 
-
-def get_institution_holdings(code: str) -> Dict:
-    return get_ifind_adapter().get_institution_holdings(code)
+def get_stock_summary(code: str) -> Dict:
+    return get_ifind_adapter().get_stock_summary(code)
 
 
 if __name__ == "__main__":
     adapter = iFinDAdapter()
+    print(f"iFinD MCP 可用: {adapter.is_available()}")
+    print(f"MCP模块加载: {MCP_AVAILABLE}")
     
-    print(f"iFinD 模式: {adapter.config.mode}")
-    print(f"可用状态: {adapter.is_available()}")
-    
-    if adapter.is_available():
-        print("\n测试获取财务数据:")
-        data = adapter.get_financial_data("000983")
+    if adapter.is_available() and not adapter.mock_mode:
+        print("\n测试获取平安银行财务数据:")
+        data = adapter.get_financial_data('000001')
         print(json.dumps(data, indent=2, ensure_ascii=False))
     else:
-        print("\niFinD 未配置，当前使用Mock模式")
-        print("请配置环境变量或 ~/.openclaw/.env:")
-        print("  IFIND_MODE=terminal|http|mock")
-        print("  IFIND_USER=你的用户名")
-        print("  IFIND_PASS=你的密码")
-        print("  IFIND_HOST=127.0.0.1 (终端模式)")
-        print("  IFIND_PORT=10080 (终端模式)")
-        print("  IFIND_TOKEN=你的API Token (HTTP模式)")
+        print("\niFinD 未配置或MCP不可用，当前使用Mock模式")
